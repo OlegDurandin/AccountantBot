@@ -377,7 +377,6 @@ fn keyboard(kind: ReplyKeyboard) -> Value {
             ],
             vec![period_button("3 месяца", active_days == 90)],
             vec![text_button("Текущий баланс", "secondary")],
-            vec![text_button("Расходы по группам", "secondary")],
             vec![text_button("Выгрузить всю историю в Excel", "positive")],
         ],
     };
@@ -430,15 +429,14 @@ mod tests {
         for (active_days, active_row, active_column) in [(14, 0, 0), (30, 0, 1), (90, 1, 0)] {
             let keyboard = keyboard(ReplyKeyboard::ExpenseHistory(active_days));
             let rows = keyboard["buttons"].as_array().unwrap();
-            assert_eq!(rows.len(), 5);
+            assert_eq!(rows.len(), 4);
             assert_eq!(rows[active_row][active_column]["color"], "primary");
             assert_eq!(rows[0][0]["action"]["label"], "14 дней");
             assert_eq!(rows[0][1]["action"]["label"], "30 дней");
             assert_eq!(rows[1][0]["action"]["label"], "3 месяца");
             assert_eq!(rows[2][0]["action"]["label"], "Текущий баланс");
-            assert_eq!(rows[3][0]["action"]["label"], "Расходы по группам");
             assert_eq!(
-                rows[4][0]["action"]["label"],
+                rows[3][0]["action"]["label"],
                 "Выгрузить всю историю в Excel"
             );
         }
