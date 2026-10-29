@@ -1,0 +1,15 @@
+services:
+  accountant-bot:
+    build: .
+    container_name: accountant-bot
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    init: true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

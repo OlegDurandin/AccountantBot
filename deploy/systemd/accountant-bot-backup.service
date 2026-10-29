@@ -1,0 +1,12 @@
+[Unit]
+Description=AccountantBot: резервная копия SQLite
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/accountant-bot
+ExecStart=/opt/accountant-bot/scripts/backup.sh /opt/accountant-bot/data/accountant.db /opt/accountant-bot/backups
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/accountant-bot/data /opt/accountant-bot/backups
+PrivateTmp=yes

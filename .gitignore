@@ -1,0 +1,8 @@
+/target
+/.env
+/data/*.db
+/data/*.db-*
+/backups/
+/tmp/
+.DS_Store
+/docs/

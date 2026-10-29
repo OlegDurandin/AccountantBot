@@ -1,0 +1,8 @@
+target
+.git
+.env
+data
+backups
+tmp
+docs
+.DS_Store
