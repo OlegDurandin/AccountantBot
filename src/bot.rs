@@ -11,7 +11,7 @@ use crate::{
     analytics::Analytics,
     chart::render_budget_chart,
     config::Config,
-    domain::{Command, ReplyKeyboard, parse_command},
+    domain::{Command, ReplyKeyboard, parse_button_payload, parse_command},
     excel::render_operations_excel,
     repository::{EventContext, ExecutionOutcome, OutboxItem, OutboxPayload, Repository},
     vk::{VkClient, VkEvent},
@@ -121,7 +121,11 @@ impl Bot {
         let message = VkClient::parse_message_event(&event)
             .context("failed to parse message_new event")?
             .message;
-        let command = match parse_command(&message.text) {
+        let payload_command = message.payload.as_deref().and_then(parse_button_payload);
+        let parsed_command = payload_command
+            .map(|command| Ok(Some(command)))
+            .unwrap_or_else(|| parse_command(&message.text));
+        let command = match parsed_command {
             Ok(Some(command)) => command,
             Ok(None) => {
                 self.analytics.event_ignored();

@@ -18,8 +18,10 @@ pub enum Command {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplyKeyboard {
     None,
+    CurrentBalance,
     OperationResult,
-    ExpenseGroups,
+    Reports,
+    ExpenseGroups(u32),
     ExpenseHistory(u32),
 }
 
@@ -27,8 +29,10 @@ impl ReplyKeyboard {
     pub fn storage_key(self) -> String {
         match self {
             Self::None => "none".into(),
+            Self::CurrentBalance => "current_balance".into(),
             Self::OperationResult => "operation_result".into(),
-            Self::ExpenseGroups => "expense_groups".into(),
+            Self::Reports => "reports".into(),
+            Self::ExpenseGroups(days) => format!("expense_groups:{days}"),
             Self::ExpenseHistory(days) => format!("expense_history:{days}"),
         }
     }
@@ -36,13 +40,19 @@ impl ReplyKeyboard {
     pub fn from_storage_key(value: &str) -> Option<Self> {
         match value {
             "none" => Some(Self::None),
+            "current_balance" => Some(Self::CurrentBalance),
             "operation_result" => Some(Self::OperationResult),
-            "expense_groups" => Some(Self::ExpenseGroups),
-            _ => value
-                .strip_prefix("expense_history:")?
-                .parse::<u32>()
-                .ok()
-                .map(Self::ExpenseHistory),
+            "reports" | "expense_groups" => Some(Self::Reports),
+            _ => {
+                if let Some(days) = value.strip_prefix("expense_groups:") {
+                    return days.parse::<u32>().ok().map(Self::ExpenseGroups);
+                }
+                value
+                    .strip_prefix("expense_history:")?
+                    .parse::<u32>()
+                    .ok()
+                    .map(Self::ExpenseHistory)
+            }
         }
     }
 }
@@ -60,8 +70,9 @@ impl Command {
             Self::Income(_) => "income",
             Self::Expense { .. } => "expense",
             Self::Balance => "balance",
-            Self::Expenses(7) => "expenses_7_days",
+            Self::Expenses(14) => "expenses_14_days",
             Self::Expenses(30) => "expenses_30_days",
+            Self::Expenses(90) => "expenses_3_months",
             Self::Expenses(_) => "expenses_custom_period",
             Self::History(14) => "history_14_days",
             Self::History(30) => "history_30_days",
@@ -107,7 +118,7 @@ pub fn parse_command(text: &str) -> Result<Option<Command>, ParseCommandError> {
             | "статистика расходов (по группам)"
             | "расходы по группам"
     ) {
-        return Ok(Some(Command::Expenses(7)));
+        return Ok(Some(Command::Expenses(14)));
     }
     if matches!(lower.as_str(), "расходы" | "история" | "история расходов")
     {
@@ -183,6 +194,19 @@ pub fn parse_command(text: &str) -> Result<Option<Command>, ParseCommandError> {
     Ok(None)
 }
 
+pub fn parse_button_payload(payload: &str) -> Option<Command> {
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    match value.get("command")?.as_str()? {
+        "expense_groups_14" => Some(Command::Expenses(14)),
+        "expense_groups_30" => Some(Command::Expenses(30)),
+        "expense_groups_90" => Some(Command::Expenses(90)),
+        "expense_history_14" => Some(Command::History(14)),
+        "expense_history_30" => Some(Command::History(30)),
+        "expense_history_90" => Some(Command::History(90)),
+        _ => None,
+    }
+}
+
 pub fn normalize_category(value: &str) -> String {
     value
         .split_whitespace()
@@ -234,7 +258,7 @@ mod tests {
     fn parses_expense_history_periods() {
         assert_eq!(
             parse_command("Статьи расходов").unwrap(),
-            Some(Command::Expenses(7))
+            Some(Command::Expenses(14))
         );
         assert_eq!(
             parse_command("История расходов").unwrap(),
@@ -258,7 +282,7 @@ mod tests {
         );
         assert_eq!(
             parse_command("Статистика расходов (по группам)").unwrap(),
-            Some(Command::Expenses(7))
+            Some(Command::Expenses(14))
         );
         assert_eq!(
             parse_command("Доходы и расходы по месяцам").unwrap(),
@@ -266,7 +290,7 @@ mod tests {
         );
         assert_eq!(
             parse_command("Расходы по группам").unwrap(),
-            Some(Command::Expenses(7))
+            Some(Command::Expenses(14))
         );
         assert_eq!(
             parse_command("Бюджет по месяцам").unwrap(),
@@ -287,6 +311,19 @@ mod tests {
     }
 
     #[test]
+    fn parses_period_button_payloads_without_ambiguous_labels() {
+        assert_eq!(
+            parse_button_payload(r#"{"command":"expense_groups_30"}"#),
+            Some(Command::Expenses(30))
+        );
+        assert_eq!(
+            parse_button_payload(r#"{"command":"expense_history_30"}"#),
+            Some(Command::History(30))
+        );
+        assert_eq!(parse_button_payload("not-json"), None);
+    }
+
+    #[test]
     fn categories_are_case_insensitive() {
         assert_eq!(normalize_category("  Зарплата  "), "зарплата");
     }
@@ -295,8 +332,10 @@ mod tests {
     fn reply_keyboards_round_trip_through_outbox_storage() {
         for keyboard in [
             ReplyKeyboard::None,
+            ReplyKeyboard::CurrentBalance,
             ReplyKeyboard::OperationResult,
-            ReplyKeyboard::ExpenseGroups,
+            ReplyKeyboard::Reports,
+            ReplyKeyboard::ExpenseGroups(30),
             ReplyKeyboard::ExpenseHistory(90),
         ] {
             assert_eq!(

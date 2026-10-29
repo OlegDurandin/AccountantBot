@@ -46,6 +46,8 @@ pub struct VkMessage {
     pub peer_id: i64,
     #[serde(default)]
     pub text: String,
+    #[serde(default)]
+    pub payload: Option<String>,
     pub conversation_message_id: i64,
     pub reply_message: Option<Box<ReplyMessage>>,
 }
@@ -354,6 +356,9 @@ fn stable_random_id(event_id: &str) -> i32 {
 fn keyboard(kind: ReplyKeyboard) -> Value {
     let buttons = match kind {
         ReplyKeyboard::None => Vec::new(),
+        ReplyKeyboard::CurrentBalance => {
+            vec![vec![text_button("Текущий баланс", "primary")]]
+        }
         ReplyKeyboard::OperationResult => vec![
             vec![
                 text_button("История расходов", "primary"),
@@ -361,7 +366,7 @@ fn keyboard(kind: ReplyKeyboard) -> Value {
             ],
             vec![text_button("Бюджет по месяцам", "secondary")],
         ],
-        ReplyKeyboard::ExpenseGroups => vec![
+        ReplyKeyboard::Reports => vec![
             vec![
                 text_button("Баланс", "primary"),
                 text_button("Расходы", "secondary"),
@@ -370,12 +375,29 @@ fn keyboard(kind: ReplyKeyboard) -> Value {
             vec![text_button("Бюджет по месяцам", "secondary")],
             vec![text_button("Выгрузить в Excel", "positive")],
         ],
+        ReplyKeyboard::ExpenseGroups(active_days) => vec![
+            vec![
+                period_button("14 дней", active_days == 14, "expense_groups_14"),
+                period_button("30 дней", active_days == 30, "expense_groups_30"),
+            ],
+            vec![period_button(
+                "3 месяца",
+                active_days == 90,
+                "expense_groups_90",
+            )],
+            vec![text_button("Текущий баланс", "secondary")],
+            vec![text_button("Выгрузить всю историю в Excel", "positive")],
+        ],
         ReplyKeyboard::ExpenseHistory(active_days) => vec![
             vec![
-                period_button("14 дней", active_days == 14),
-                period_button("30 дней", active_days == 30),
+                period_button("14 дней", active_days == 14, "expense_history_14"),
+                period_button("30 дней", active_days == 30, "expense_history_30"),
             ],
-            vec![period_button("3 месяца", active_days == 90)],
+            vec![period_button(
+                "3 месяца",
+                active_days == 90,
+                "expense_history_90",
+            )],
             vec![text_button("Текущий баланс", "secondary")],
             vec![text_button("Выгрузить всю историю в Excel", "positive")],
         ],
@@ -387,8 +409,15 @@ fn text_button(label: &str, color: &str) -> Value {
     json!({"action": {"type": "text", "label": label}, "color": color})
 }
 
-fn period_button(label: &str, active: bool) -> Value {
-    text_button(label, if active { "primary" } else { "secondary" })
+fn period_button(label: &str, active: bool, command: &str) -> Value {
+    json!({
+        "action": {
+            "type": "text",
+            "label": label,
+            "payload": json!({"command": command}).to_string(),
+        },
+        "color": if active { "primary" } else { "secondary" },
+    })
 }
 
 #[cfg(test)]
@@ -406,8 +435,17 @@ mod tests {
     }
 
     #[test]
-    fn expense_groups_keyboard_has_requested_layout() {
-        let keyboard = keyboard(ReplyKeyboard::ExpenseGroups);
+    fn excel_keyboard_has_only_current_balance() {
+        let keyboard = keyboard(ReplyKeyboard::CurrentBalance);
+        let rows = keyboard["buttons"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].as_array().unwrap().len(), 1);
+        assert_eq!(rows[0][0]["action"]["label"], "Текущий баланс");
+    }
+
+    #[test]
+    fn reports_keyboard_has_requested_layout() {
+        let keyboard = keyboard(ReplyKeyboard::Reports);
         assert_eq!(keyboard["buttons"][0][0]["action"]["label"], "Баланс");
         assert_eq!(keyboard["buttons"][0][1]["action"]["label"], "Расходы");
         assert_eq!(
@@ -421,6 +459,28 @@ mod tests {
         assert_eq!(
             keyboard["buttons"][3][0]["action"]["label"],
             "Выгрузить в Excel"
+        );
+    }
+
+    #[test]
+    fn expense_groups_keyboard_has_periods_and_active_selection() {
+        for (active_days, active_row, active_column) in [(14, 0, 0), (30, 0, 1), (90, 1, 0)] {
+            let keyboard = keyboard(ReplyKeyboard::ExpenseGroups(active_days));
+            let rows = keyboard["buttons"].as_array().unwrap();
+            assert_eq!(rows.len(), 4);
+            assert_eq!(rows[active_row][active_column]["color"], "primary");
+            assert_eq!(rows[0][0]["action"]["label"], "14 дней");
+            assert_eq!(rows[0][1]["action"]["label"], "30 дней");
+            assert_eq!(rows[1][0]["action"]["label"], "3 месяца");
+            assert_eq!(rows[2][0]["action"]["label"], "Текущий баланс");
+            assert_eq!(
+                rows[3][0]["action"]["label"],
+                "Выгрузить всю историю в Excel"
+            );
+        }
+        assert_eq!(
+            keyboard(ReplyKeyboard::ExpenseGroups(14))["buttons"][0][0]["action"]["payload"],
+            r#"{"command":"expense_groups_14"}"#
         );
     }
 

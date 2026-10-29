@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool, sqlite::SqliteConnectOptions, sqlite::SqlitePoolOptions};
 use tracing::info;
 
-use crate::domain::{Command, ExportScope, ReplyKeyboard};
+use crate::domain::{Command, ReplyKeyboard};
 
 #[derive(Debug, Clone)]
 pub struct EventContext {
@@ -141,7 +141,7 @@ impl Repository {
 
         if matches!(command, Command::BudgetStatistics) {
             let months = budget_months_in_tx(&mut tx, event.peer_id).await?;
-            let keyboard = ReplyKeyboard::ExpenseGroups;
+            let keyboard = ReplyKeyboard::Reports;
             enqueue_outbox(
                 &mut tx,
                 &event.event_id,
@@ -154,12 +154,9 @@ impl Repository {
             return Ok(ExecutionOutcome::BudgetChart { months, keyboard });
         }
 
-        if let Command::ExportExcel(scope) = command {
+        if let Command::ExportExcel(_) = command {
             let rows = export_operations_in_tx(&mut tx, event.peer_id).await?;
-            let keyboard = match scope {
-                ExportScope::Expenses => ReplyKeyboard::ExpenseGroups,
-                ExportScope::FullHistory => ReplyKeyboard::ExpenseHistory(14),
-            };
+            let keyboard = ReplyKeyboard::CurrentBalance;
             enqueue_outbox(
                 &mut tx,
                 &event.event_id,
@@ -213,12 +210,12 @@ impl Repository {
                 let balance = balance_in_tx(&mut tx, event.peer_id).await?;
                 (
                     format!("Остаток: {} ₽.", format_money(balance)),
-                    ReplyKeyboard::ExpenseGroups,
+                    ReplyKeyboard::Reports,
                 )
             }
             Command::Expenses(days) => (
                 expenses_in_tx(&mut tx, event.peer_id, *days).await?,
-                ReplyKeyboard::ExpenseGroups,
+                ReplyKeyboard::ExpenseGroups(*days),
             ),
             Command::History(days) => (
                 history_in_tx(&mut tx, event.peer_id, *days).await?,
@@ -228,7 +225,7 @@ impl Repository {
             Command::ExportExcel(_) => unreachable!("handled before the command match"),
             Command::SeedDemo => (
                 seed_demo_in_tx(&mut tx, event).await?,
-                ReplyKeyboard::ExpenseGroups,
+                ReplyKeyboard::Reports,
             ),
             Command::Cancel => (
                 cancel_in_tx(&mut tx, event).await?,
@@ -581,15 +578,13 @@ async fn expenses_in_tx(
     peer_id: i64,
     days: u32,
 ) -> Result<String> {
-    if days == 7 {
-        return expense_groups_in_tx(tx, peer_id).await;
-    }
-    expense_list_in_tx(tx, peer_id, days).await
+    expense_groups_in_tx(tx, peer_id, days).await
 }
 
 async fn expense_groups_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     peer_id: i64,
+    days: u32,
 ) -> Result<String> {
     let rows = sqlx::query(
         "SELECT COALESCE(category, 'без категории') AS category,
@@ -598,19 +593,25 @@ async fn expense_groups_in_tx(
          WHERE peer_id = ?
            AND kind = 'expense'
            AND cancelled_by_event_id IS NULL
-           AND created_at >= datetime('now', '-7 days')
+           AND created_at >= datetime('now', ?)
          GROUP BY category
          ORDER BY total DESC, category ASC",
     )
     .bind(peer_id)
+    .bind(format!("-{days} days"))
     .fetch_all(&mut **tx)
     .await?;
 
+    let period = if days == 90 {
+        "3 месяца".to_string()
+    } else {
+        format!("{days} дней")
+    };
     if rows.is_empty() {
-        return Ok("За последние 7 дней расходов не было.".into());
+        return Ok(format!("За последние {period} расходов не было."));
     }
 
-    let mut lines = vec!["Расходы по группам за 7 дней:".to_string()];
+    let mut lines = vec![format!("Расходы по группам за {period}:")];
     for row in rows {
         let category: String = row.get("category");
         let total: i64 = row.get("total");
@@ -618,50 +619,6 @@ async fn expense_groups_in_tx(
             "{}: {} ₽",
             capitalize_category(&category),
             format_money(total)
-        ));
-    }
-    Ok(lines.join("\n"))
-}
-
-async fn expense_list_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    peer_id: i64,
-    days: u32,
-) -> Result<String> {
-    let rows = sqlx::query(
-        "SELECT amount,
-                COALESCE(category, 'без категории') AS category,
-                author_id,
-                datetime(created_at, '+3 hours') AS created_at
-         FROM operations
-         WHERE peer_id = ?
-           AND kind = 'expense'
-           AND cancelled_by_event_id IS NULL
-           AND created_at >= datetime('now', ?)
-         ORDER BY created_at DESC, id DESC",
-    )
-    .bind(peer_id)
-    .bind(format!("-{days} days"))
-    .fetch_all(&mut **tx)
-    .await?;
-    if rows.is_empty() {
-        return Ok(format!("За последние {days} дней расходов не было."));
-    }
-
-    let total: i64 = rows.iter().map(|row| row.get::<i64, _>("amount")).sum();
-    let title = format!("Полный список расходов за последние {days} дней");
-    let mut lines = vec![format!("{title}: {} ₽", format_money(total))];
-    for row in rows {
-        let created_at: String = row.get("created_at");
-        let category: String = row.get("category");
-        let amount: i64 = row.get("amount");
-        let author_id: i64 = row.get("author_id");
-        lines.push(format!(
-            "• {} · {} · {} ₽ · vk.com/id{}",
-            &created_at[..created_at.len().min(10)],
-            category,
-            format_money(amount),
-            author_id
         ));
     }
     Ok(lines.join("\n"))
@@ -801,8 +758,8 @@ fn help_text() -> String {
         "• Расход Материалы 4000",
         "• Баланс",
         "• История расходов — последние 14 дней",
-        "• Расходы по группам — группировка по категориям за 7 дней",
-        "• 14 дней / 30 дней / 3 месяца — период истории расходов",
+        "• Расходы по группам — группировка по категориям за выбранный период",
+        "• 14 дней / 30 дней / 3 месяца — период истории или группировки расходов",
         "• Бюджет по месяцам",
         "• Текущий баланс",
         "• Выгрузить в Excel",
@@ -888,15 +845,15 @@ mod tests {
                 if message.contains("материалы") && message.contains("4 000")
         ));
         let expenses = repository
-            .execute(&event("6", 6), &Command::Expenses(7))
+            .execute(&event("6", 6), &Command::Expenses(14))
             .await
             .unwrap();
         assert!(matches!(
             expenses,
             ExecutionOutcome::Reply {
                 message,
-                keyboard: ReplyKeyboard::ExpenseGroups,
-            } if message.contains("за 7 дней")
+                keyboard: ReplyKeyboard::ExpenseGroups(14),
+            } if message.contains("за 14 дней")
         ));
         let duplicate = repository
             .execute(&event("3", 3), &Command::Income(999_999))
@@ -906,7 +863,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn groups_expenses_by_category_for_seven_days() {
+    async fn groups_expenses_by_category_for_selected_period() {
         let repository = Repository::connect("sqlite::memory:").await.unwrap();
         repository.migrate().await.unwrap();
 
@@ -927,14 +884,37 @@ mod tests {
                 .unwrap();
         }
 
+        sqlx::query(
+            "UPDATE operations
+             SET created_at = datetime('now', '-20 days')
+             WHERE event_id = 'expense-3'",
+        )
+        .execute(&repository.pool)
+        .await
+        .unwrap();
+
+        let recent = repository
+            .execute(&event("statistics-14", 4), &Command::Expenses(14))
+            .await
+            .unwrap();
+        assert!(matches!(
+            recent,
+            ExecutionOutcome::Reply {
+                message,
+                keyboard: ReplyKeyboard::ExpenseGroups(14),
+            } if message.contains("Материалы: 10 000 ₽")
+                && !message.contains("Зарплата аниматорам")
+        ));
+
         let outcome = repository
-            .execute(&event("statistics", 4), &Command::Expenses(7))
+            .execute(&event("statistics-30", 5), &Command::Expenses(30))
             .await
             .unwrap();
         assert!(matches!(
             outcome,
             ExecutionOutcome::Reply { message, .. }
                 if message.contains("Расходы по группам")
+                    && message.contains("за 30 дней")
                     && message.contains("Материалы: 10 000 ₽")
                     && message.contains("Зарплата аниматорам: 10 000 ₽")
         ));
@@ -1057,14 +1037,14 @@ mod tests {
         let outcome = repository
             .execute(
                 &event("excel-export", 4),
-                &Command::ExportExcel(ExportScope::FullHistory),
+                &Command::ExportExcel(crate::domain::ExportScope::FullHistory),
             )
             .await
             .unwrap();
         let ExecutionOutcome::Excel { rows, keyboard } = outcome else {
             panic!("expected an Excel export");
         };
-        assert_eq!(keyboard, ReplyKeyboard::ExpenseHistory(14));
+        assert_eq!(keyboard, ReplyKeyboard::CurrentBalance);
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].operation_type, "Начальный остаток");
         assert_eq!(rows[0].income, Some(50_000));
