@@ -752,18 +752,18 @@ async fn cancel_in_tx(
 
 fn help_text() -> String {
     [
-        "Команды:",
-        "• Начальный остаток 50000",
-        "• Доход 15000 (или Приход 15000)",
-        "• Расход Материалы 4000",
-        "• Баланс",
-        "• История расходов — последние 14 дней",
-        "• Расходы по группам — группировка по категориям за выбранный период",
-        "• 14 дней / 30 дней / 3 месяца — период истории или группировки расходов",
-        "• Бюджет по месяцам",
-        "• Текущий баланс",
-        "• Выгрузить в Excel",
-        "• Отмена — ответом на сообщение с операцией или для последней своей операции",
+        "🐰 Зая на связи!",
+        "Могу записать приход или расход и показать, сколько денег в кассе.",
+        "",
+        "Мои команды:",
+        "• Зая начальный остаток 50000",
+        "• Зая доход 15000 (или Зая приход 15000)",
+        "• Зая расход Материалы 4000",
+        "• Зая баланс",
+        "• Зая история расходов",
+        "• Зая расходы по группам",
+        "• Зая бюджет по месяцам",
+        "• Зая отмена — ответом на сообщение с операцией или для последней своей операции",
     ]
     .join("\n")
 }
@@ -802,6 +802,56 @@ mod tests {
     fn formats_money() {
         assert_eq!(format_money(61_000), "61 000");
         assert_eq!(format_money(-4_000), "−4 000");
+    }
+
+    #[test]
+    fn help_introduces_zaya_and_prefixed_commands() {
+        let help = help_text();
+        assert!(help.starts_with("🐰 Зая на связи!"));
+        assert!(help.contains("Зая баланс"));
+        assert!(help.contains("Зая расход Материалы 4000"));
+    }
+
+    #[tokio::test]
+    async fn balances_are_isolated_by_conversation() {
+        let repository = Repository::connect("sqlite::memory:").await.unwrap();
+        repository.migrate().await.unwrap();
+
+        let mut first_chat = event("chat-1-opening", 1);
+        first_chat.peer_id = 101;
+        repository
+            .execute(&first_chat, &Command::OpeningBalance(10_000))
+            .await
+            .unwrap();
+
+        let mut second_chat = event("chat-2-opening", 1);
+        second_chat.peer_id = 202;
+        repository
+            .execute(&second_chat, &Command::OpeningBalance(25_000))
+            .await
+            .unwrap();
+
+        let mut first_balance = event("chat-1-balance", 2);
+        first_balance.peer_id = 101;
+        let first = repository
+            .execute(&first_balance, &Command::Balance)
+            .await
+            .unwrap();
+        assert!(matches!(
+            first,
+            ExecutionOutcome::Reply { message, .. } if message.contains("10 000")
+        ));
+
+        let mut second_balance = event("chat-2-balance", 2);
+        second_balance.peer_id = 202;
+        let second = repository
+            .execute(&second_balance, &Command::Balance)
+            .await
+            .unwrap();
+        assert!(matches!(
+            second,
+            ExecutionOutcome::Reply { message, .. } if message.contains("25 000")
+        ));
     }
 
     #[tokio::test]

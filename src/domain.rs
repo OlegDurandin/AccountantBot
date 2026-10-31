@@ -98,20 +98,24 @@ impl fmt::Display for ParseCommandError {
 }
 
 pub fn parse_command(text: &str) -> Result<Option<Command>, ParseCommandError> {
-    let text = text.trim();
-    let lower = text.to_lowercase();
+    let lower = text.trim().to_lowercase();
+    let lower = match strip_bot_address(&lower) {
+        Some("") => "помощь",
+        Some(command) => command,
+        None => &lower,
+    };
 
-    if matches!(lower.as_str(), "баланс" | "остаток" | "текущий баланс") {
+    if matches!(lower, "баланс" | "остаток" | "текущий баланс") {
         return Ok(Some(Command::Balance));
     }
     if matches!(
-        lower.as_str(),
+        lower,
         "статистика бюджета" | "доходы и расходы по месяцам" | "бюджет по месяцам"
     ) {
         return Ok(Some(Command::BudgetStatistics));
     }
     if matches!(
-        lower.as_str(),
+        lower,
         "статьи расходов"
             | "график расходов"
             | "статистика расходов"
@@ -120,50 +124,44 @@ pub fn parse_command(text: &str) -> Result<Option<Command>, ParseCommandError> {
     ) {
         return Ok(Some(Command::Expenses(14)));
     }
-    if matches!(lower.as_str(), "расходы" | "история" | "история расходов")
-    {
+    if matches!(lower, "расходы" | "история" | "история расходов") {
         return Ok(Some(Command::History(14)));
     }
     if matches!(
-        lower.as_str(),
+        lower,
         "история 14 дней" | "история за 14 дней" | "история: 14 дней" | "14 дней"
     ) {
         return Ok(Some(Command::History(14)));
     }
     if matches!(
-        lower.as_str(),
+        lower,
         "история 30 дней" | "история за 30 дней" | "история: 30 дней" | "30 дней"
     ) {
         return Ok(Some(Command::History(30)));
     }
     if matches!(
-        lower.as_str(),
+        lower,
         "история 3 месяца" | "история за 3 месяца" | "история: 3 месяца" | "3 месяца"
     ) {
         return Ok(Some(Command::History(90)));
     }
-    if matches!(lower.as_str(), "история за год" | "история год") {
+    if matches!(lower, "история за год" | "история год") {
         return Ok(Some(Command::History(365)));
     }
     if lower == "выгрузить всю историю в excel" {
         return Ok(Some(Command::ExportExcel(ExportScope::FullHistory)));
     }
-    if matches!(
-        lower.as_str(),
-        "выгрузить в excel" | "выгрузка в excel" | "excel"
-    ) {
+    if matches!(lower, "выгрузить в excel" | "выгрузка в excel" | "excel") {
         return Ok(Some(Command::ExportExcel(ExportScope::Expenses)));
     }
-    if matches!(
-        lower.as_str(),
-        "тестовые данные" | "заполнить тестовыми данными"
-    ) {
+    if matches!(lower, "тестовые данные" | "заполнить тестовыми данными")
+    {
         return Ok(Some(Command::SeedDemo));
     }
     if lower == "отмена" {
         return Ok(Some(Command::Cancel));
     }
-    if matches!(lower.as_str(), "помощь" | "help" | "команды" | "начать") {
+    if matches!(lower, "помощь" | "help" | "команды" | "начать") {
         return Ok(Some(Command::Help));
     }
 
@@ -192,6 +190,20 @@ pub fn parse_command(text: &str) -> Result<Option<Command>, ParseCommandError> {
     }
 
     Ok(None)
+}
+
+fn strip_bot_address(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("зая")?;
+    if rest.is_empty() {
+        return Some("");
+    }
+    let first = rest.chars().next()?;
+    if !first.is_whitespace() && !matches!(first, ',' | ':' | '!' | '?' | '.') {
+        return None;
+    }
+    Some(rest.trim_start_matches(|ch: char| {
+        ch.is_whitespace() || matches!(ch, ',' | ':' | '!' | '?' | '.')
+    }))
 }
 
 pub fn parse_button_payload(payload: &str) -> Option<Command> {
@@ -252,6 +264,21 @@ mod tests {
     #[test]
     fn ignores_regular_conversation_messages() {
         assert_eq!(parse_command("Кто сегодня работает?").unwrap(), None);
+        assert_eq!(parse_command("Заяц баланс").unwrap(), None);
+    }
+
+    #[test]
+    fn accepts_case_insensitive_bot_address() {
+        assert_eq!(parse_command("Зая").unwrap(), Some(Command::Help));
+        assert_eq!(parse_command("зая").unwrap(), Some(Command::Help));
+        assert_eq!(parse_command("ЗАЯ баланс").unwrap(), Some(Command::Balance));
+        assert_eq!(
+            parse_command("зая, расход Материалы 1000").unwrap(),
+            Some(Command::Expense {
+                category: "материалы".into(),
+                amount: 1_000,
+            })
+        );
     }
 
     #[test]
