@@ -24,11 +24,11 @@ pub enum ExecutionOutcome {
         keyboard: ReplyKeyboard,
     },
     BudgetChart {
-        months: Vec<BudgetMonth>,
+        month_count: usize,
         keyboard: ReplyKeyboard,
     },
     Excel {
-        rows: Vec<ExportOperation>,
+        operation_count: usize,
         keyboard: ReplyKeyboard,
     },
 }
@@ -120,6 +120,17 @@ impl Repository {
         Ok(())
     }
 
+    pub async fn known_peer_ids(&self) -> Result<Vec<i64>> {
+        sqlx::query_scalar(
+            "SELECT DISTINCT peer_id
+             FROM processed_events
+             ORDER BY peer_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to load known conversations")
+    }
+
     pub async fn execute(
         &self,
         event: &EventContext,
@@ -141,32 +152,28 @@ impl Repository {
 
         if matches!(command, Command::BudgetStatistics) {
             let months = budget_months_in_tx(&mut tx, event.peer_id).await?;
+            let month_count = months.len();
             let keyboard = ReplyKeyboard::Reports;
-            enqueue_outbox(
-                &mut tx,
-                &event.event_id,
-                event.peer_id,
-                &OutboxPayload::BudgetChart(months.clone()),
-                keyboard,
-            )
-            .await?;
+            let payload = OutboxPayload::BudgetChart(months);
+            enqueue_outbox(&mut tx, &event.event_id, event.peer_id, &payload, keyboard).await?;
             tx.commit().await?;
-            return Ok(ExecutionOutcome::BudgetChart { months, keyboard });
+            return Ok(ExecutionOutcome::BudgetChart {
+                month_count,
+                keyboard,
+            });
         }
 
         if let Command::ExportExcel(_) = command {
             let rows = export_operations_in_tx(&mut tx, event.peer_id).await?;
+            let operation_count = rows.len();
             let keyboard = ReplyKeyboard::CurrentBalance;
-            enqueue_outbox(
-                &mut tx,
-                &event.event_id,
-                event.peer_id,
-                &OutboxPayload::Excel(rows.clone()),
-                keyboard,
-            )
-            .await?;
+            let payload = OutboxPayload::Excel(rows);
+            enqueue_outbox(&mut tx, &event.event_id, event.peer_id, &payload, keyboard).await?;
             tx.commit().await?;
-            return Ok(ExecutionOutcome::Excel { rows, keyboard });
+            return Ok(ExecutionOutcome::Excel {
+                operation_count,
+                keyboard,
+            });
         }
 
         let (message, keyboard) = match command {
@@ -229,6 +236,10 @@ impl Repository {
             Command::ExportExcel(_) => unreachable!("handled before the command match"),
             Command::SeedDemo => (
                 seed_demo_in_tx(&mut tx, event).await?,
+                ReplyKeyboard::Reports,
+            ),
+            Command::DeleteDemo => (
+                delete_demo_in_tx(&mut tx, event.peer_id).await?,
                 ReplyKeyboard::Reports,
             ),
             Command::Cancel => (
@@ -574,6 +585,64 @@ async fn seed_demo_in_tx(
 
     Ok(format!(
         "Тестовые данные готовы: добавлено {inserted} операций за текущий и три предыдущих месяца. Повторный запуск не создаёт дубли."
+    ))
+}
+
+async fn delete_demo_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    peer_id: i64,
+) -> Result<String> {
+    let event_pattern = format!("demo:{peer_id}:*");
+    let demo_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM operations
+         WHERE peer_id = ? AND event_id GLOB ?",
+    )
+    .bind(peer_id)
+    .bind(&event_pattern)
+    .fetch_one(&mut **tx)
+    .await?;
+
+    if demo_count == 0 {
+        return Ok("Тестовых данных в этой беседе нет.".into());
+    }
+
+    let removed_cancellations = sqlx::query(
+        "DELETE FROM operations
+         WHERE peer_id = ?
+           AND kind = 'cancel'
+           AND target_operation_id IN (
+               SELECT id
+               FROM operations
+               WHERE peer_id = ? AND event_id GLOB ?
+           )",
+    )
+    .bind(peer_id)
+    .bind(peer_id)
+    .bind(&event_pattern)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+
+    let removed_demo = sqlx::query(
+        "DELETE FROM operations
+         WHERE peer_id = ? AND event_id GLOB ?",
+    )
+    .bind(peer_id)
+    .bind(&event_pattern)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    let balance = balance_in_tx(tx, peer_id).await?;
+
+    let cancellation_note = if removed_cancellations > 0 {
+        format!(" Связанных отмен удалено: {removed_cancellations}.")
+    } else {
+        String::new()
+    };
+    Ok(format!(
+        "Тестовые данные удалены: {removed_demo} операций.{cancellation_note} Остаток: {} ₽.",
+        format_money(balance)
     ))
 }
 
@@ -1328,11 +1397,16 @@ mod tests {
             .unwrap();
         assert!(matches!(
             chart,
-            ExecutionOutcome::BudgetChart { months, .. }
-                if months.len() == 4
-                    && months.iter().any(|month| month.income > 0)
-                    && months.iter().any(|month| month.expenses > 0)
+            ExecutionOutcome::BudgetChart { month_count: 4, .. }
         ));
+        let pending = repository.pending_outbox(10).await.unwrap();
+        assert!(pending.iter().any(|item| {
+            item.event_id == "chart"
+                && matches!(&item.payload, OutboxPayload::BudgetChart(months)
+                    if months.len() == 4
+                        && months.iter().any(|month| month.income > 0)
+                        && months.iter().any(|month| month.expenses > 0))
+        }));
 
         let second = repository
             .execute(&event("seed-command-2", 3), &Command::SeedDemo)
@@ -1341,6 +1415,94 @@ mod tests {
         assert!(matches!(
             second,
             ExecutionOutcome::Reply { message, .. } if message.contains("добавлено 0 операций")
+        ));
+    }
+
+    #[tokio::test]
+    async fn deletes_only_demo_data_for_current_conversation_and_allows_reseed() {
+        let repository = Repository::connect("sqlite::memory:").await.unwrap();
+        repository.migrate().await.unwrap();
+
+        repository
+            .execute(&event("seed-delete-test", 1), &Command::SeedDemo)
+            .await
+            .unwrap();
+        repository
+            .execute(&event("cancel-demo-row", 2), &Command::Cancel)
+            .await
+            .unwrap();
+        repository
+            .execute(&event("real-income", 3), &Command::Income(1_234))
+            .await
+            .unwrap();
+
+        let mut other_chat = event("seed-other-chat", 1);
+        other_chat.peer_id = 99;
+        repository
+            .execute(&other_chat, &Command::SeedDemo)
+            .await
+            .unwrap();
+
+        let deleted = repository
+            .execute(&event("delete-demo", 4), &Command::DeleteDemo)
+            .await
+            .unwrap();
+        assert!(matches!(
+            deleted,
+            ExecutionOutcome::Reply { message, .. }
+                if message.contains("удалены: 11 операций")
+                    && message.contains("Связанных отмен удалено: 1")
+                    && message.contains("Остаток: 1 234 ₽")
+        ));
+
+        let own_demo: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM operations
+             WHERE peer_id = 42 AND event_id GLOB 'demo:42:*'",
+        )
+        .fetch_one(&repository.pool)
+        .await
+        .unwrap();
+        let own_cancellations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM operations WHERE peer_id = 42 AND kind = 'cancel'",
+        )
+        .fetch_one(&repository.pool)
+        .await
+        .unwrap();
+        let real_operations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM operations WHERE peer_id = 42 AND event_id = 'real-income'",
+        )
+        .fetch_one(&repository.pool)
+        .await
+        .unwrap();
+        let other_demo: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM operations
+             WHERE peer_id = 99 AND event_id GLOB 'demo:99:*'",
+        )
+        .fetch_one(&repository.pool)
+        .await
+        .unwrap();
+        assert_eq!(own_demo, 0);
+        assert_eq!(own_cancellations, 0);
+        assert_eq!(real_operations, 1);
+        assert_eq!(other_demo, 11);
+
+        let already_empty = repository
+            .execute(&event("delete-demo-empty", 5), &Command::DeleteDemo)
+            .await
+            .unwrap();
+        assert!(matches!(
+            already_empty,
+            ExecutionOutcome::Reply { message, .. }
+                if message == "Тестовых данных в этой беседе нет."
+        ));
+
+        let reseeded = repository
+            .execute(&event("seed-again", 6), &Command::SeedDemo)
+            .await
+            .unwrap();
+        assert!(matches!(
+            reseeded,
+            ExecutionOutcome::Reply { message, .. } if message.contains("добавлено 11 операций")
         ));
     }
 
@@ -1379,24 +1541,29 @@ mod tests {
             )
             .await
             .unwrap();
-        let ExecutionOutcome::Excel { rows, keyboard } = outcome else {
+        let ExecutionOutcome::Excel {
+            operation_count,
+            keyboard,
+        } = outcome
+        else {
             panic!("expected an Excel export");
         };
         assert_eq!(keyboard, ReplyKeyboard::CurrentBalance);
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].operation_type, "Начальный остаток");
-        assert_eq!(rows[0].income, Some(50_000));
-        assert_eq!(rows[0].balance, 50_000);
-        assert_eq!(rows[1].operation_type, "Приход");
-        assert_eq!(rows[1].balance, 65_000);
-        assert_eq!(rows[2].operation_type, "Расход — Материалы");
-        assert_eq!(rows[2].expense, Some(4_000));
-        assert_eq!(rows[2].balance, 61_000);
+        assert_eq!(operation_count, 3);
 
         let pending = repository.pending_outbox(10).await.unwrap();
         assert!(pending.iter().any(|item| {
             item.event_id == "excel-export"
-                && matches!(&item.payload, OutboxPayload::Excel(rows) if rows.len() == 3)
+                && matches!(&item.payload, OutboxPayload::Excel(rows)
+                    if rows.len() == 3
+                        && rows[0].operation_type == "Начальный остаток"
+                        && rows[0].income == Some(50_000)
+                        && rows[0].balance == 50_000
+                        && rows[1].operation_type == "Приход"
+                        && rows[1].balance == 65_000
+                        && rows[2].operation_type == "Расход — Материалы"
+                        && rows[2].expense == Some(4_000)
+                        && rows[2].balance == 61_000)
         }));
     }
 
@@ -1480,5 +1647,28 @@ mod tests {
         .unwrap();
         assert_eq!(attempt_count, 1);
         assert_eq!(sent, 1);
+    }
+
+    #[tokio::test]
+    async fn lists_known_conversations_once_in_stable_order() {
+        let repository = Repository::connect("sqlite::memory:").await.unwrap();
+        repository.migrate().await.unwrap();
+
+        repository
+            .execute(&event("peer-42-first", 1), &Command::Help)
+            .await
+            .unwrap();
+        repository
+            .execute(&event("peer-42-second", 2), &Command::Balance)
+            .await
+            .unwrap();
+        let mut other_peer = event("peer-99", 3);
+        other_peer.peer_id = 99;
+        repository
+            .execute(&other_peer, &Command::Help)
+            .await
+            .unwrap();
+
+        assert_eq!(repository.known_peer_ids().await.unwrap(), vec![42, 99]);
     }
 }

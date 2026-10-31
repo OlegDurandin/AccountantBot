@@ -5,8 +5,8 @@ use plotters::prelude::*;
 
 use crate::repository::BudgetMonth;
 
-const WIDTH: u32 = 1200;
-const HEIGHT: u32 = 720;
+const WIDTH: u32 = 900;
+const HEIGHT: u32 = 540;
 const INCOME_COLOR: RGBColor = RGBColor(46, 160, 67);
 const EXPENSE_COLOR: RGBColor = RGBColor(218, 54, 51);
 
@@ -97,6 +97,8 @@ pub fn render_budget_chart(months: &[BudgetMonth]) -> Result<Vec<u8>> {
     let mut encoder = png::Encoder::new(&mut output, WIDTH, HEIGHT);
     encoder.set_color(png::ColorType::Rgb);
     encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(png::Compression::Fast);
+    encoder.set_filter(png::FilterType::Sub);
     encoder
         .write_header()
         .context("failed to create PNG header")?

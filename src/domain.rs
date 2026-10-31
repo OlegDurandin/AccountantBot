@@ -12,6 +12,7 @@ pub enum Command {
     BudgetStatistics,
     ExportExcel(ExportScope),
     SeedDemo,
+    DeleteDemo,
     Cancel,
     Help,
 }
@@ -84,6 +85,7 @@ impl Command {
             Self::ExportExcel(ExportScope::Expenses) => "export_expenses_excel",
             Self::ExportExcel(ExportScope::FullHistory) => "export_full_history_excel",
             Self::SeedDemo => "seed_demo",
+            Self::DeleteDemo => "delete_demo",
             Self::Cancel => "cancel",
             Self::Help => "help",
         }
@@ -171,6 +173,12 @@ pub fn parse_command(text: &str) -> Result<Option<Command>, ParseCommandError> {
     if matches!(lower, "тестовые данные" | "заполнить тестовыми данными")
     {
         return Ok(Some(Command::SeedDemo));
+    }
+    if matches!(
+        lower,
+        "удалить тестовые данные" | "очистить тестовые данные"
+    ) {
+        return Ok(Some(Command::DeleteDemo));
     }
     if lower == "отмена" {
         return Ok(Some(Command::Cancel));
@@ -353,6 +361,14 @@ mod tests {
                 category: "материалы".into(),
                 amount: 1_000,
             })
+        );
+        assert_eq!(
+            parse_command("Зая удалить тестовые данные").unwrap(),
+            Some(Command::DeleteDemo)
+        );
+        assert_eq!(
+            parse_command("очистить тестовые данные").unwrap(),
+            Some(Command::DeleteDemo)
         );
     }
 

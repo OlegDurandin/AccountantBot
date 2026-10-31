@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use bytes::Bytes;
 use reqwest::{Client, multipart};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -121,7 +122,7 @@ impl VkClient {
         &self,
         peer_id: i64,
         event_id: &str,
-        png: Vec<u8>,
+        png: Bytes,
         keyboard_kind: ReplyKeyboard,
     ) -> Result<()> {
         let upload_server: PhotoUploadServer = self
@@ -130,9 +131,10 @@ impl VkClient {
                 vec![("peer_id".into(), peer_id.to_string())],
             )
             .await?;
+        let png_length = png.len() as u64;
         let form = multipart::Form::new().part(
             "photo",
-            multipart::Part::bytes(png)
+            multipart::Part::stream_with_length(png, png_length)
                 .file_name("budget-statistics.png")
                 .mime_str("image/png")?,
         );
@@ -181,7 +183,7 @@ impl VkClient {
         &self,
         peer_id: i64,
         event_id: &str,
-        xlsx: Vec<u8>,
+        xlsx: Bytes,
         keyboard_kind: ReplyKeyboard,
     ) -> Result<()> {
         let upload_server: DocumentUploadServer = self
@@ -193,9 +195,10 @@ impl VkClient {
                 ],
             )
             .await?;
+        let xlsx_length = xlsx.len() as u64;
         let form = multipart::Form::new().part(
             "file",
-            multipart::Part::bytes(xlsx)
+            multipart::Part::stream_with_length(xlsx, xlsx_length)
                 .file_name("finance-history.xlsx")
                 .mime_str("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")?,
         );

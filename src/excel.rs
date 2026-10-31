@@ -5,10 +5,14 @@ use crate::repository::ExportOperation;
 
 pub fn render_operations_excel(rows: &[ExportOperation]) -> Result<Vec<u8>> {
     let mut workbook = Workbook::new();
-    let worksheet = workbook.add_worksheet();
+    workbook.set_zip_compression_level(1);
+    let worksheet = workbook
+        .add_worksheet_with_constant_memory()
+        .context("failed to create constant-memory Excel worksheet")?;
     worksheet.set_name("История операций")?;
     worksheet.set_screen_gridlines(false);
     worksheet.set_freeze_panes(3, 0)?;
+    worksheet.set_default_row_height(20);
 
     let title_format = Format::new()
         .set_font_name("Arial")
@@ -83,7 +87,6 @@ pub fn render_operations_excel(rows: &[ExportOperation]) -> Result<Vec<u8>> {
             worksheet.write_blank(row, 4, &money_format)?;
         }
         worksheet.write_number_with_format(row, 5, operation.balance as f64, &money_format)?;
-        worksheet.set_row_height(row, 20)?;
     }
 
     if rows.is_empty() {

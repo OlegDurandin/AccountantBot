@@ -1,8 +1,13 @@
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-use accountant_bot::{bot::Bot, config::Config, repository::Repository, vk::VkClient};
-use anyhow::Result;
-use tracing::info;
+use accountant_bot::{
+    bot::Bot, config::Config, domain::ReplyKeyboard, repository::Repository, vk::VkClient,
+};
+use anyhow::{Result, bail};
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -14,13 +19,32 @@ async fn main() -> Result<()> {
     ensure_database_directory(&config.database_url)?;
 
     let repository = Repository::connect(&config.database_url).await?;
-    repository.migrate().await?;
+    let application_command = std::env::args().nth(1);
+    if application_command.is_none() {
+        repository.migrate().await?;
+    }
 
     let vk = VkClient::new(
         config.vk_token.clone(),
         config.vk_group_id,
         config.vk_api_version.clone(),
     )?;
+
+    if let Some(command) = application_command {
+        let (phase, message) = match command.as_str() {
+            "notify-updating" => (
+                "updating",
+                "🐰 Зая обновляется. Вернусь на связь через пару минут!",
+            ),
+            "notify-updated" => (
+                "updated",
+                "🐰 Зая обновилась и снова на связи! Можно продолжать работу.",
+            ),
+            _ => bail!("unknown application command: {command}"),
+        };
+        notify_known_conversations(&repository, &vk, phase, message).await?;
+        return Ok(());
+    }
 
     info!(
         group_id = config.vk_group_id,
@@ -31,6 +55,43 @@ async fn main() -> Result<()> {
         "accountant bot started"
     );
     Bot::new(config, repository, vk).run().await
+}
+
+async fn notify_known_conversations(
+    repository: &Repository,
+    vk: &VkClient,
+    phase: &str,
+    message: &str,
+) -> Result<()> {
+    let peer_ids = repository.known_peer_ids().await?;
+    if peer_ids.is_empty() {
+        info!(phase, "no known conversations to notify about deployment");
+        return Ok(());
+    }
+
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+    let mut failed = 0_usize;
+    for peer_id in &peer_ids {
+        let event_id = format!("deployment:{phase}:{timestamp}:{peer_id}");
+        if let Err(error) = vk
+            .send_message(*peer_id, &event_id, message, ReplyKeyboard::None)
+            .await
+        {
+            failed += 1;
+            warn!(peer_id, phase, error = %error, "failed to send deployment notification");
+        }
+    }
+
+    info!(
+        phase,
+        conversations = peer_ids.len(),
+        failed,
+        "deployment notifications processed"
+    );
+    if failed == peer_ids.len() {
+        bail!("failed to notify every known conversation");
+    }
+    Ok(())
 }
 
 fn init_logging() {
