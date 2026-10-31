@@ -8,6 +8,7 @@ pub enum Command {
     Balance,
     Expenses(u32),
     History(u32),
+    MonthlyExpenses { month: u8, year: Option<i32> },
     BudgetStatistics,
     ExportExcel(ExportScope),
     SeedDemo,
@@ -78,6 +79,7 @@ impl Command {
             Self::History(30) => "history_30_days",
             Self::History(90) => "history_3_months",
             Self::History(_) => "history_custom_period",
+            Self::MonthlyExpenses { .. } => "expenses_calendar_month",
             Self::BudgetStatistics => "budget_statistics",
             Self::ExportExcel(ExportScope::Expenses) => "export_expenses_excel",
             Self::ExportExcel(ExportScope::FullHistory) => "export_full_history_excel",
@@ -98,7 +100,11 @@ impl fmt::Display for ParseCommandError {
 }
 
 pub fn parse_command(text: &str) -> Result<Option<Command>, ParseCommandError> {
-    let lower = text.trim().to_lowercase();
+    let lower = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
     let lower = match strip_bot_address(&lower) {
         Some("") => "помощь",
         Some(command) => command,
@@ -123,6 +129,14 @@ pub fn parse_command(text: &str) -> Result<Option<Command>, ParseCommandError> {
             | "расходы по группам"
     ) {
         return Ok(Some(Command::Expenses(14)));
+    }
+    if lower == "расходы за" {
+        return Err(ParseCommandError(
+            "Укажите месяц: Зая расходы за октябрь или Зая расходы за октябрь 2026".into(),
+        ));
+    }
+    if let Some(period) = lower.strip_prefix("расходы за ") {
+        return parse_calendar_month(period).map(Some);
     }
     if matches!(lower, "расходы" | "история" | "история расходов") {
         return Ok(Some(Command::History(14)));
@@ -190,6 +204,67 @@ pub fn parse_command(text: &str) -> Result<Option<Command>, ParseCommandError> {
     }
 
     Ok(None)
+}
+
+fn parse_calendar_month(value: &str) -> Result<Command, ParseCommandError> {
+    let value = value.trim().trim_end_matches(['.', ',', '!', '?']);
+    let parts = value.split_whitespace().collect::<Vec<_>>();
+    if parts.is_empty() {
+        return Err(ParseCommandError(
+            "Укажите месяц: Зая расходы за октябрь".into(),
+        ));
+    }
+    if parts.len() > 2 {
+        return Err(ParseCommandError(
+            "Формат команды: Зая расходы за <месяц> [год]".into(),
+        ));
+    }
+
+    let month = parse_russian_month(parts[0]).ok_or_else(|| {
+        ParseCommandError(format!(
+            "Неизвестный месяц «{}». Например: Зая расходы за октябрь",
+            parts[0]
+        ))
+    })?;
+    let year = parts
+        .get(1)
+        .map(|value| {
+            if value.len() != 4 || !value.chars().all(|ch| ch.is_ascii_digit()) {
+                return Err(ParseCommandError(
+                    "Год укажите четырьмя цифрами, например 2026".into(),
+                ));
+            }
+            let year = value.parse::<i32>().map_err(|_| {
+                ParseCommandError("Не удалось распознать год. Например: 2026".into())
+            })?;
+            if !(2000..=2100).contains(&year) {
+                return Err(ParseCommandError(
+                    "Год должен быть в диапазоне от 2000 до 2100".into(),
+                ));
+            }
+            Ok(year)
+        })
+        .transpose()?;
+
+    Ok(Command::MonthlyExpenses { month, year })
+}
+
+fn parse_russian_month(value: &str) -> Option<u8> {
+    match value {
+        "январь" | "января" => Some(1),
+        "февраль" | "февраля" => Some(2),
+        "март" | "марта" => Some(3),
+        "апрель" | "апреля" => Some(4),
+        "май" | "мая" => Some(5),
+        "июнь" | "июня" => Some(6),
+        "июль" | "июля" => Some(7),
+        "август" | "августа" => Some(8),
+        "сентябрь" | "сентября" => Some(9),
+        "октябрь" | "октября" => Some(10),
+        "ноябрь" | "ноября" => Some(11),
+        "декабрь" | "декабря" => Some(12),
+        _ => None,
+    }
 }
 
 fn strip_bot_address(text: &str) -> Option<&str> {
@@ -335,6 +410,64 @@ mod tests {
             parse_command("3 месяца").unwrap(),
             Some(Command::History(90))
         );
+    }
+
+    #[test]
+    fn parses_all_calendar_months_and_grammatical_forms() {
+        for (month, nominative, genitive) in [
+            (1, "январь", "января"),
+            (2, "февраль", "февраля"),
+            (3, "март", "марта"),
+            (4, "апрель", "апреля"),
+            (5, "май", "мая"),
+            (6, "июнь", "июня"),
+            (7, "июль", "июля"),
+            (8, "август", "августа"),
+            (9, "сентябрь", "сентября"),
+            (10, "октябрь", "октября"),
+            (11, "ноябрь", "ноября"),
+            (12, "декабрь", "декабря"),
+        ] {
+            for name in [nominative, genitive] {
+                assert_eq!(
+                    parse_command(&format!("Расходы за {name}")).unwrap(),
+                    Some(Command::MonthlyExpenses { month, year: None })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parses_calendar_month_with_address_year_and_punctuation() {
+        assert_eq!(
+            parse_command("Зая, расходы за Октябрь 2026!").unwrap(),
+            Some(Command::MonthlyExpenses {
+                month: 10,
+                year: Some(2026),
+            })
+        );
+        assert_eq!(
+            parse_command("  зая   расходы за   ноября\n2025  ").unwrap(),
+            Some(Command::MonthlyExpenses {
+                month: 11,
+                year: Some(2025),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_calendar_month_commands() {
+        for command in [
+            "Расходы за",
+            "Расходы за октобрь",
+            "Расходы за октябрь 26",
+            "Расходы за октябрь 1999",
+            "Расходы за октябрь 2101",
+            "Расходы за октябрь 2026 лишнее",
+        ] {
+            assert!(parse_command(command).is_err(), "command: {command}");
+        }
+        assert_eq!(parse_command("Расходы заработок").unwrap(), None);
     }
 
     #[test]

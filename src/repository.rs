@@ -221,6 +221,10 @@ impl Repository {
                 history_in_tx(&mut tx, event.peer_id, *days).await?,
                 ReplyKeyboard::ExpenseHistory(*days),
             ),
+            Command::MonthlyExpenses { month, year } => (
+                monthly_expenses_in_tx(&mut tx, event.peer_id, *month, *year).await?,
+                ReplyKeyboard::Reports,
+            ),
             Command::BudgetStatistics => unreachable!("handled before the command match"),
             Command::ExportExcel(_) => unreachable!("handled before the command match"),
             Command::SeedDemo => (
@@ -684,6 +688,143 @@ async fn history_in_tx(
     Ok(lines.join("\n"))
 }
 
+async fn monthly_expenses_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    peer_id: i64,
+    month: u8,
+    requested_year: Option<i32>,
+) -> Result<String> {
+    if !(1..=12).contains(&month) {
+        return Err(anyhow!("invalid calendar month: {month}"));
+    }
+
+    let current = sqlx::query(
+        "SELECT CAST(strftime('%Y', 'now', '+3 hours') AS INTEGER) AS year,
+                CAST(strftime('%m', 'now', '+3 hours') AS INTEGER) AS month",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    let current_year = current.get::<i64, _>("year") as i32;
+    let current_month = current.get::<i64, _>("month") as u8;
+    let year = resolve_calendar_month_year(month, requested_year, current_year, current_month);
+    let (start, end) = calendar_month_bounds(year, month);
+
+    let rows = sqlx::query(
+        "SELECT amount,
+                COALESCE(category, 'без категории') AS category,
+                author_id,
+                datetime(created_at, '+3 hours') AS created_at
+         FROM operations
+         WHERE peer_id = ?
+           AND kind = 'expense'
+           AND cancelled_by_event_id IS NULL
+           AND datetime(created_at, '+3 hours') >= ?
+           AND datetime(created_at, '+3 hours') < ?
+         ORDER BY created_at DESC, id DESC",
+    )
+    .bind(peer_id)
+    .bind(&start)
+    .bind(&end)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let month_name = russian_month_name(month);
+    if rows.is_empty() {
+        return Ok(format!("За {month_name} {year} года расходов не было."));
+    }
+
+    let total: i64 = rows.iter().map(|row| row.get::<i64, _>("amount")).sum();
+    let title = format!(
+        "Расходы за {month_name} {year} года: {} ₽",
+        format_money(total)
+    );
+    let lines = rows
+        .iter()
+        .map(|row| {
+            let created_at: String = row.get("created_at");
+            let category: String = row.get("category");
+            let amount: i64 = row.get("amount");
+            let author_id: i64 = row.get("author_id");
+            format!(
+                "• {} · {} · {} ₽ · vk.com/id{}",
+                &created_at[..created_at.len().min(10)],
+                capitalize_category(&category),
+                format_money(amount),
+                author_id
+            )
+        })
+        .collect::<Vec<_>>();
+    Ok(render_limited_expense_history(title, &lines))
+}
+
+fn resolve_calendar_month_year(
+    month: u8,
+    requested_year: Option<i32>,
+    current_year: i32,
+    current_month: u8,
+) -> i32 {
+    requested_year.unwrap_or_else(|| {
+        if month > current_month {
+            current_year - 1
+        } else {
+            current_year
+        }
+    })
+}
+
+fn calendar_month_bounds(year: i32, month: u8) -> (String, String) {
+    let start = format!("{year:04}-{month:02}-01 00:00:00");
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    let end = format!("{next_year:04}-{next_month:02}-01 00:00:00");
+    (start, end)
+}
+
+fn russian_month_name(month: u8) -> &'static str {
+    match month {
+        1 => "январь",
+        2 => "февраль",
+        3 => "март",
+        4 => "апрель",
+        5 => "май",
+        6 => "июнь",
+        7 => "июль",
+        8 => "август",
+        9 => "сентябрь",
+        10 => "октябрь",
+        11 => "ноябрь",
+        12 => "декабрь",
+        _ => "неизвестный месяц",
+    }
+}
+
+fn render_limited_expense_history(title: String, lines: &[String]) -> String {
+    const BODY_LIMIT_CHARS: usize = 3_600;
+
+    let mut message = title;
+    let mut shown = 0;
+    for line in lines {
+        let next_length = message.chars().count() + 1 + line.chars().count();
+        if next_length > BODY_LIMIT_CHARS {
+            break;
+        }
+        message.push('\n');
+        message.push_str(line);
+        shown += 1;
+    }
+
+    let omitted = lines.len() - shown;
+    if omitted > 0 {
+        message.push_str(&format!(
+            "\n… Не показано операций: {omitted}. Полная история доступна через выгрузку в Excel."
+        ));
+    }
+    message
+}
+
 async fn cancel_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     event: &EventContext,
@@ -761,6 +902,7 @@ fn help_text() -> String {
         "• Зая расход Материалы 4000",
         "• Зая баланс",
         "• Зая история расходов",
+        "• Зая расходы за октябрь (или Зая расходы за октябрь 2026)",
         "• Зая расходы по группам",
         "• Зая бюджет по месяцам",
         "• Зая отмена — ответом на сообщение с операцией или для последней своей операции",
@@ -810,6 +952,152 @@ mod tests {
         assert!(help.starts_with("🐰 Зая на связи!"));
         assert!(help.contains("Зая баланс"));
         assert!(help.contains("Зая расход Материалы 4000"));
+        assert!(help.contains("Зая расходы за октябрь"));
+    }
+
+    #[test]
+    fn resolves_omitted_calendar_year_to_latest_started_month() {
+        assert_eq!(resolve_calendar_month_year(10, None, 2026, 10), 2026);
+        assert_eq!(resolve_calendar_month_year(11, None, 2026, 10), 2025);
+        assert_eq!(resolve_calendar_month_year(12, Some(2024), 2026, 10), 2024);
+    }
+
+    #[test]
+    fn calendar_month_bounds_handle_year_rollover() {
+        assert_eq!(
+            calendar_month_bounds(2026, 10),
+            ("2026-10-01 00:00:00".into(), "2026-11-01 00:00:00".into())
+        );
+        assert_eq!(
+            calendar_month_bounds(2026, 12),
+            ("2026-12-01 00:00:00".into(), "2027-01-01 00:00:00".into())
+        );
+    }
+
+    #[test]
+    fn truncates_oversized_monthly_history_safely() {
+        let lines = (0..500)
+            .map(|index| {
+                format!(
+                    "• 2026-10-31 · Очень длинная категория номер {index} · 100 000 ₽ · vk.com/id7"
+                )
+            })
+            .collect::<Vec<_>>();
+        let rendered = render_limited_expense_history("Расходы за октябрь".into(), &lines);
+        assert!(rendered.chars().count() < 4_096);
+        assert!(rendered.contains("Не показано операций"));
+    }
+
+    #[tokio::test]
+    async fn monthly_expenses_respect_moscow_boundaries_and_conversation() {
+        let repository = Repository::connect("sqlite::memory:").await.unwrap();
+        repository.migrate().await.unwrap();
+
+        for (event_id, peer_id, category, amount, created_at, cancelled) in [
+            (
+                "before-october",
+                42,
+                "до месяца",
+                500,
+                "2026-09-30 20:59:59",
+                None,
+            ),
+            (
+                "october-start",
+                42,
+                "начало месяца",
+                1_000,
+                "2026-09-30 21:00:00",
+                None,
+            ),
+            (
+                "october-end",
+                42,
+                "конец месяца",
+                2_000,
+                "2026-10-31 20:59:59",
+                None,
+            ),
+            (
+                "after-october",
+                42,
+                "после месяца",
+                4_000,
+                "2026-10-31 21:00:00",
+                None,
+            ),
+            (
+                "cancelled-october",
+                42,
+                "отменённая",
+                8_000,
+                "2026-10-15 10:00:00",
+                Some("cancel-event"),
+            ),
+            (
+                "other-chat-october",
+                99,
+                "другая беседа",
+                16_000,
+                "2026-10-15 10:00:00",
+                None,
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO operations
+                 (event_id, peer_id, author_id, message_id, kind, amount, category,
+                  cancelled_by_event_id, created_at)
+                 VALUES (?, ?, 7, 1, 'expense', ?, ?, ?, ?)",
+            )
+            .bind(event_id)
+            .bind(peer_id)
+            .bind(amount)
+            .bind(category)
+            .bind(cancelled)
+            .bind(created_at)
+            .execute(&repository.pool)
+            .await
+            .unwrap();
+        }
+
+        let outcome = repository
+            .execute(
+                &event("october-report", 10),
+                &Command::MonthlyExpenses {
+                    month: 10,
+                    year: Some(2026),
+                },
+            )
+            .await
+            .unwrap();
+        let ExecutionOutcome::Reply { message, keyboard } = outcome else {
+            panic!("expected monthly expense reply");
+        };
+        assert_eq!(keyboard, ReplyKeyboard::Reports);
+        assert!(message.contains("Расходы за октябрь 2026 года: 3 000 ₽"));
+        assert!(message.contains("Начало месяца"));
+        assert!(message.contains("Конец месяца"));
+        assert!(!message.contains("До месяца"));
+        assert!(!message.contains("После месяца"));
+        assert!(!message.contains("Отменённая"));
+        assert!(!message.contains("Другая беседа"));
+        assert!(message.find("Конец месяца") < message.find("Начало месяца"));
+
+        let empty = repository
+            .execute(
+                &event("august-report", 11),
+                &Command::MonthlyExpenses {
+                    month: 8,
+                    year: Some(2026),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            empty,
+            ExecutionOutcome::Reply { message, .. }
+                if message == "За август 2026 года расходов не было."
+        ));
     }
 
     #[tokio::test]
