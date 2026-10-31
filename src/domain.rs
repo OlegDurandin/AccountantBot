@@ -6,6 +6,7 @@ pub enum Command {
     Income(i64),
     Expense { category: String, amount: i64 },
     Balance,
+    ConversationalBalance,
     Expenses(u32),
     History(u32),
     MonthlyExpenses { month: u8, year: Option<i32> },
@@ -14,6 +15,8 @@ pub enum Command {
     SeedDemo,
     DeleteDemo,
     Cancel,
+    Thanks,
+    Praise,
     Help,
 }
 
@@ -72,6 +75,7 @@ impl Command {
             Self::Income(_) => "income",
             Self::Expense { .. } => "expense",
             Self::Balance => "balance",
+            Self::ConversationalBalance => "conversational_balance",
             Self::Expenses(14) => "expenses_14_days",
             Self::Expenses(30) => "expenses_30_days",
             Self::Expenses(90) => "expenses_3_months",
@@ -87,6 +91,8 @@ impl Command {
             Self::SeedDemo => "seed_demo",
             Self::DeleteDemo => "delete_demo",
             Self::Cancel => "cancel",
+            Self::Thanks => "thanks",
+            Self::Praise => "praise",
             Self::Help => "help",
         }
     }
@@ -107,11 +113,51 @@ pub fn parse_command(text: &str) -> Result<Option<Command>, ParseCommandError> {
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase();
-    let lower = match strip_bot_address(&lower) {
+    let addressed = strip_bot_address(&lower);
+    let lower = match addressed {
         Some("") => "помощь",
         Some(command) => command,
         None => &lower,
     };
+    let lower = lower.trim_end_matches(['.', ',', '!', '?', ':', ';']);
+
+    if addressed.is_some()
+        && [
+            "сколько у нас осталось денюжек",
+            "сколько у нас осталось денежек",
+            "сколько у нас осталось денег",
+            "сколько осталось денюжек",
+            "сколько осталось денежек",
+            "сколько осталось денег",
+            "сколько у нас денюжек",
+            "сколько у нас денежек",
+            "сколько у нас денег",
+        ]
+        .iter()
+        .any(|phrase| matches_friendly_phrase(lower, phrase))
+    {
+        return Ok(Some(Command::ConversationalBalance));
+    }
+    if addressed.is_some()
+        && ["спасибо", "спасибочки", "благодарю"]
+            .iter()
+            .any(|phrase| matches_friendly_phrase(lower, phrase))
+    {
+        return Ok(Some(Command::Thanks));
+    }
+    if addressed.is_some()
+        && [
+            "ты молодец",
+            "молодец",
+            "ты умница",
+            "умница",
+            "ты молодчинка",
+        ]
+        .iter()
+        .any(|phrase| matches_friendly_phrase(lower, phrase))
+    {
+        return Ok(Some(Command::Praise));
+    }
 
     if matches!(lower, "баланс" | "остаток" | "текущий баланс") {
         return Ok(Some(Command::Balance));
@@ -289,6 +335,14 @@ fn strip_bot_address(text: &str) -> Option<&str> {
     }))
 }
 
+fn matches_friendly_phrase(value: &str, phrase: &str) -> bool {
+    value == phrase
+        || value
+            .strip_prefix(phrase)
+            .and_then(|suffix| suffix.chars().next())
+            .is_some_and(|ch| !ch.is_alphanumeric())
+}
+
 pub fn parse_button_payload(payload: &str) -> Option<Command> {
     let value: serde_json::Value = serde_json::from_str(payload).ok()?;
     match value.get("command")?.as_str()? {
@@ -348,6 +402,50 @@ mod tests {
     fn ignores_regular_conversation_messages() {
         assert_eq!(parse_command("Кто сегодня работает?").unwrap(), None);
         assert_eq!(parse_command("Заяц баланс").unwrap(), None);
+        assert_eq!(
+            parse_command("Сколько у нас осталось денюжек?").unwrap(),
+            None
+        );
+        assert_eq!(parse_command("Спасибо!").unwrap(), None);
+    }
+
+    #[test]
+    fn understands_friendly_addressed_phrases() {
+        for phrase in [
+            "Зая, сколько у нас осталось денюжек?",
+            "зая сколько у нас осталось денег",
+            "ЗАЯ: сколько осталось денежек!",
+        ] {
+            assert_eq!(
+                parse_command(phrase).unwrap(),
+                Some(Command::ConversationalBalance),
+                "phrase: {phrase}"
+            );
+        }
+        for phrase in [
+            "Зая, спасибо!",
+            "зая спасибочки",
+            "ЗАЯ: благодарю",
+            "Зая, спасибо большое 💛",
+        ] {
+            assert_eq!(
+                parse_command(phrase).unwrap(),
+                Some(Command::Thanks),
+                "phrase: {phrase}"
+            );
+        }
+        for phrase in [
+            "Зая, ты молодец!",
+            "зая умница",
+            "ЗАЯ: ты молодчинка",
+            "Зая, ты молодец 😅",
+        ] {
+            assert_eq!(
+                parse_command(phrase).unwrap(),
+                Some(Command::Praise),
+                "phrase: {phrase}"
+            );
+        }
     }
 
     #[test]

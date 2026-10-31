@@ -220,6 +220,13 @@ impl Repository {
                     ReplyKeyboard::Reports,
                 )
             }
+            Command::ConversationalBalance => {
+                let balance = balance_in_tx(&mut tx, event.peer_id).await?;
+                (
+                    format!("🐰 У нас осталось {} ₽ денюжек.", format_money(balance)),
+                    ReplyKeyboard::Reports,
+                )
+            }
             Command::Expenses(days) => (
                 expenses_in_tx(&mut tx, event.peer_id, *days).await?,
                 ReplyKeyboard::ExpenseGroups(*days),
@@ -245,6 +252,14 @@ impl Repository {
             Command::Cancel => (
                 cancel_in_tx(&mut tx, event).await?,
                 ReplyKeyboard::OperationResult,
+            ),
+            Command::Thanks => (
+                "Пожалуйста! 🐰💛 Рада помогать вам считать денюжки.".into(),
+                ReplyKeyboard::None,
+            ),
+            Command::Praise => (
+                "Ой, я сейчас покраснею ушками! 🐰🥹 Спасибо, я очень стараюсь для вас.".into(),
+                ReplyKeyboard::None,
             ),
             Command::Help => (help_text(), ReplyKeyboard::OperationResult),
         };
@@ -970,6 +985,7 @@ fn help_text() -> String {
         "• Зая доход 15000 (или Зая приход 15000)",
         "• Зая расход Материалы 4000",
         "• Зая баланс",
+        "• Зая, сколько у нас осталось денюжек?",
         "• Зая история расходов",
         "• Зая расходы за октябрь (или Зая расходы за октябрь 2026)",
         "• Зая расходы по группам",
@@ -1670,5 +1686,48 @@ mod tests {
             .unwrap();
 
         assert_eq!(repository.known_peer_ids().await.unwrap(), vec![42, 99]);
+    }
+
+    #[tokio::test]
+    async fn answers_friendly_phrases_without_changing_the_balance() {
+        let repository = Repository::connect("sqlite::memory:").await.unwrap();
+        repository.migrate().await.unwrap();
+        repository
+            .execute(&event("friendly-income", 1), &Command::Income(12_345))
+            .await
+            .unwrap();
+
+        let balance = repository
+            .execute(
+                &event("friendly-balance", 2),
+                &Command::ConversationalBalance,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            balance,
+            ExecutionOutcome::Reply { message, keyboard: ReplyKeyboard::Reports }
+                if message == "🐰 У нас осталось 12 345 ₽ денюжек."
+        ));
+
+        let thanks = repository
+            .execute(&event("friendly-thanks", 3), &Command::Thanks)
+            .await
+            .unwrap();
+        assert!(matches!(
+            thanks,
+            ExecutionOutcome::Reply { message, keyboard: ReplyKeyboard::None }
+                if message.contains("Пожалуйста!")
+        ));
+
+        let praise = repository
+            .execute(&event("friendly-praise", 4), &Command::Praise)
+            .await
+            .unwrap();
+        assert!(matches!(
+            praise,
+            ExecutionOutcome::Reply { message, keyboard: ReplyKeyboard::None }
+                if message.contains("покраснею ушками")
+        ));
     }
 }

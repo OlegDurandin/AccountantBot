@@ -10,6 +10,8 @@ use anyhow::{Result, bail};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
+const RELEASE_NOTES: &str = include_str!("../deploy/release-notes.txt");
+
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
@@ -34,15 +36,18 @@ async fn main() -> Result<()> {
         let (phase, message) = match command.as_str() {
             "notify-updating" => (
                 "updating",
-                "🐰 Зая обновляется. Вернусь на связь через пару минут!",
+                "🐰 Зая обновляется. Вернусь на связь через пару минут!".to_string(),
             ),
             "notify-updated" => (
                 "updated",
-                "🐰 Зая обновилась и снова на связи! Можно продолжать работу.",
+                format!(
+                    "🐰 Я обновилась! Теперь я умею:\n{}\n\nЯ снова на связи — можно продолжать считать денюжки 💛",
+                    RELEASE_NOTES.trim()
+                ),
             ),
             _ => bail!("unknown application command: {command}"),
         };
-        notify_known_conversations(&repository, &vk, phase, message).await?;
+        notify_known_conversations(&repository, &vk, phase, &message).await?;
         return Ok(());
     }
 

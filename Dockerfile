@@ -5,6 +5,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY migrations ./migrations
+COPY deploy/release-notes.txt ./deploy/release-notes.txt
 RUN --mount=type=cache,id=accountant-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=accountant-cargo-git,target=/usr/local/cargo/git/db,sharing=locked \
     --mount=type=cache,id=accountant-cargo-target,target=/app/target,sharing=locked \
