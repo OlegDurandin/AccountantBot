@@ -346,6 +346,10 @@ fn matches_friendly_phrase(value: &str, phrase: &str) -> bool {
 pub fn parse_button_payload(payload: &str) -> Option<Command> {
     let value: serde_json::Value = serde_json::from_str(payload).ok()?;
     match value.get("command")?.as_str()? {
+        "balance" => Some(Command::Balance),
+        "budget_statistics" => Some(Command::BudgetStatistics),
+        "export_expenses_excel" => Some(Command::ExportExcel(ExportScope::Expenses)),
+        "export_full_history_excel" => Some(Command::ExportExcel(ExportScope::FullHistory)),
         "expense_groups_14" => Some(Command::Expenses(14)),
         "expense_groups_30" => Some(Command::Expenses(30)),
         "expense_groups_90" => Some(Command::Expenses(90)),
@@ -354,6 +358,17 @@ pub fn parse_button_payload(payload: &str) -> Option<Command> {
         "expense_history_90" => Some(Command::History(90)),
         _ => None,
     }
+}
+
+pub fn strip_vk_group_mention(text: &str, group_id: u64) -> Option<&str> {
+    let text = text.trim_start();
+    let mention = ["club", "public"]
+        .iter()
+        .find_map(|kind| text.strip_prefix(&format!("[{kind}{group_id}|")))?;
+    let closing_bracket = mention.find(']')?;
+    let command = mention[closing_bracket + 1..]
+        .trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ':'));
+    (!command.is_empty()).then_some(command)
 }
 
 pub fn normalize_category(value: &str) -> String {
@@ -675,6 +690,65 @@ mod tests {
             Some(Command::History(30))
         );
         assert_eq!(parse_button_payload("not-json"), None);
+    }
+
+    #[test]
+    fn parses_all_non_period_button_payloads() {
+        assert_eq!(
+            parse_button_payload(r#"{"command":"balance"}"#),
+            Some(Command::Balance)
+        );
+        assert_eq!(
+            parse_button_payload(r#"{"command":"budget_statistics"}"#),
+            Some(Command::BudgetStatistics)
+        );
+        assert_eq!(
+            parse_button_payload(r#"{"command":"export_expenses_excel"}"#),
+            Some(Command::ExportExcel(ExportScope::Expenses))
+        );
+        assert_eq!(
+            parse_button_payload(r#"{"command":"export_full_history_excel"}"#),
+            Some(Command::ExportExcel(ExportScope::FullHistory))
+        );
+    }
+
+    #[test]
+    fn strips_only_the_configured_vk_group_mention() {
+        assert_eq!(
+            strip_vk_group_mention("[club123|Бухгалтерия ЭкЛерка] Расходы", 123),
+            Some("Расходы")
+        );
+        assert_eq!(
+            strip_vk_group_mention("[club999|Чужая группа] Расходы", 123),
+            None
+        );
+        assert_eq!(
+            strip_vk_group_mention("[public123|Бухгалтерия ЭкЛерка], Выгрузить в Excel", 123),
+            Some("Выгрузить в Excel")
+        );
+        assert_eq!(
+            strip_vk_group_mention("[club1234|Другая] Расходы", 123),
+            None
+        );
+        assert_eq!(strip_vk_group_mention("Расходы", 123), None);
+    }
+
+    #[test]
+    fn parses_button_text_with_group_mention_from_old_keyboards() {
+        for (text, expected) in [
+            (
+                "[club123|Бухгалтерия ЭкЛерка] Расходы",
+                Command::History(14),
+            ),
+            (
+                "[club123|Бухгалтерия ЭкЛерка] Выгрузить в Excel",
+                Command::ExportExcel(ExportScope::Expenses),
+            ),
+            ("[club123|Бухгалтерия ЭкЛерка] Баланс", Command::Balance),
+        ] {
+            let text = strip_vk_group_mention(text, 123).unwrap();
+            assert_eq!(parse_command(text).unwrap(), Some(expected), "text: {text}");
+        }
     }
 
     #[test]

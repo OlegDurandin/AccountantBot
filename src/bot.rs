@@ -14,7 +14,7 @@ use crate::{
     analytics::Analytics,
     chart::render_budget_chart,
     config::Config,
-    domain::{Command, ReplyKeyboard, parse_button_payload, parse_command},
+    domain::{Command, ReplyKeyboard, parse_button_payload, parse_command, strip_vk_group_mention},
     excel::render_operations_excel,
     repository::{
         BudgetMonth, EventContext, ExecutionOutcome, ExportOperation, OutboxItem, OutboxPayload,
@@ -178,9 +178,11 @@ impl Bot {
             .context("failed to parse message_new event")?
             .message;
         let payload_command = message.payload.as_deref().and_then(parse_button_payload);
+        let command_text =
+            strip_vk_group_mention(&message.text, self.config.vk_group_id).unwrap_or(&message.text);
         let parsed_command = payload_command
             .map(|command| Ok(Some(command)))
-            .unwrap_or_else(|| parse_command(&message.text));
+            .unwrap_or_else(|| parse_command(command_text));
         let command = match parsed_command {
             Ok(Some(command)) => command,
             Ok(None) => {

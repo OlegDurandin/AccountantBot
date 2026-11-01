@@ -360,23 +360,39 @@ fn keyboard(kind: ReplyKeyboard) -> Value {
     let buttons = match kind {
         ReplyKeyboard::None => Vec::new(),
         ReplyKeyboard::CurrentBalance => {
-            vec![vec![text_button("Текущий баланс", "primary")]]
+            vec![vec![command_button("Текущий баланс", "primary", "balance")]]
         }
         ReplyKeyboard::OperationResult => vec![
             vec![
-                text_button("История расходов", "primary"),
-                text_button("Расходы по группам", "secondary"),
+                command_button("История расходов", "primary", "expense_history_14"),
+                command_button("Расходы по группам", "secondary", "expense_groups_14"),
             ],
-            vec![text_button("Бюджет по месяцам", "secondary")],
+            vec![command_button(
+                "Бюджет по месяцам",
+                "secondary",
+                "budget_statistics",
+            )],
         ],
         ReplyKeyboard::Reports => vec![
             vec![
-                text_button("Баланс", "primary"),
-                text_button("Расходы", "secondary"),
+                command_button("Баланс", "primary", "balance"),
+                command_button("Расходы", "secondary", "expense_history_14"),
             ],
-            vec![text_button("Расходы по группам", "secondary")],
-            vec![text_button("Бюджет по месяцам", "secondary")],
-            vec![text_button("Выгрузить в Excel", "positive")],
+            vec![command_button(
+                "Расходы по группам",
+                "secondary",
+                "expense_groups_14",
+            )],
+            vec![command_button(
+                "Бюджет по месяцам",
+                "secondary",
+                "budget_statistics",
+            )],
+            vec![command_button(
+                "Выгрузить в Excel",
+                "positive",
+                "export_expenses_excel",
+            )],
         ],
         ReplyKeyboard::ExpenseGroups(active_days) => vec![
             vec![
@@ -388,8 +404,12 @@ fn keyboard(kind: ReplyKeyboard) -> Value {
                 active_days == 90,
                 "expense_groups_90",
             )],
-            vec![text_button("Текущий баланс", "secondary")],
-            vec![text_button("Выгрузить всю историю в Excel", "positive")],
+            vec![command_button("Текущий баланс", "secondary", "balance")],
+            vec![command_button(
+                "Выгрузить всю историю в Excel",
+                "positive",
+                "export_full_history_excel",
+            )],
         ],
         ReplyKeyboard::ExpenseHistory(active_days) => vec![
             vec![
@@ -401,15 +421,26 @@ fn keyboard(kind: ReplyKeyboard) -> Value {
                 active_days == 90,
                 "expense_history_90",
             )],
-            vec![text_button("Текущий баланс", "secondary")],
-            vec![text_button("Выгрузить всю историю в Excel", "positive")],
+            vec![command_button("Текущий баланс", "secondary", "balance")],
+            vec![command_button(
+                "Выгрузить всю историю в Excel",
+                "positive",
+                "export_full_history_excel",
+            )],
         ],
     };
     json!({"inline": true, "buttons": buttons})
 }
 
-fn text_button(label: &str, color: &str) -> Value {
-    json!({"action": {"type": "text", "label": label}, "color": color})
+fn command_button(label: &str, color: &str, command: &str) -> Value {
+    json!({
+        "action": {
+            "type": "text",
+            "label": label,
+            "payload": json!({"command": command}).to_string(),
+        },
+        "color": color,
+    })
 }
 
 fn period_button(label: &str, active: bool, command: &str) -> Value {
@@ -502,6 +533,31 @@ mod tests {
                 rows[3][0]["action"]["label"],
                 "Выгрузить всю историю в Excel"
             );
+        }
+    }
+
+    #[test]
+    fn every_keyboard_button_has_a_recognized_payload() {
+        for kind in [
+            ReplyKeyboard::CurrentBalance,
+            ReplyKeyboard::OperationResult,
+            ReplyKeyboard::Reports,
+            ReplyKeyboard::ExpenseGroups(14),
+            ReplyKeyboard::ExpenseGroups(30),
+            ReplyKeyboard::ExpenseGroups(90),
+            ReplyKeyboard::ExpenseHistory(14),
+            ReplyKeyboard::ExpenseHistory(30),
+            ReplyKeyboard::ExpenseHistory(90),
+        ] {
+            for row in keyboard(kind)["buttons"].as_array().unwrap() {
+                for button in row.as_array().unwrap() {
+                    let payload = button["action"]["payload"].as_str().unwrap();
+                    assert!(
+                        crate::domain::parse_button_payload(payload).is_some(),
+                        "keyboard: {kind:?}, payload: {payload}"
+                    );
+                }
+            }
         }
     }
 }
