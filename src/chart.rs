@@ -108,12 +108,13 @@ pub fn render_budget_chart(months: &[BudgetMonth]) -> Result<Vec<u8>> {
 }
 
 fn compact_money(value: i64) -> String {
-    if value.abs() >= 1_000_000 {
-        format!("{:.1} млн", value as f64 / 1_000_000.0)
-    } else if value.abs() >= 1_000 {
-        format!("{} тыс.", value / 1_000)
+    let rubles = value as f64 / 100.0;
+    if rubles.abs() >= 1_000_000.0 {
+        format!("{:.1} млн", rubles / 1_000_000.0)
+    } else if rubles.abs() >= 1_000.0 {
+        format!("{:.0} тыс.", rubles / 1_000.0)
     } else {
-        value.to_string()
+        format!("{rubles:.0}")
     }
 }
 
@@ -153,13 +154,13 @@ mod tests {
         let png = render_budget_chart(&[
             BudgetMonth {
                 label: "2026-08".into(),
-                income: 100_000,
-                expenses: 60_000,
+                income: 10_000_000,
+                expenses: 6_000_000,
             },
             BudgetMonth {
                 label: "2026-09".into(),
-                income: 130_000,
-                expenses: 75_000,
+                income: 13_000_000,
+                expenses: 7_500_000,
             },
         ])
         .unwrap();

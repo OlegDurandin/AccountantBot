@@ -116,6 +116,10 @@ impl Repository {
                 .await
                 .context("failed to apply Excel outbox migration")?;
         }
+        sqlx::raw_sql(include_str!("../migrations/0005_amounts_to_kopecks.sql"))
+            .execute(&self.pool)
+            .await
+            .context("failed to migrate operation amounts to kopecks")?;
         info!("database migration completed");
         Ok(())
     }
@@ -528,50 +532,50 @@ async fn seed_demo_in_tx(
     event: &EventContext,
 ) -> Result<String> {
     let demo_rows = [
-        ("income-current", "income", 120_000, None, "-5 days"),
+        ("income-current", "income", 12_000_000, None, "-5 days"),
         (
             "materials-current",
             "expense",
-            30_000,
+            3_000_000,
             Some("материалы"),
             "-4 days",
         ),
         (
             "salary-current",
             "expense",
-            20_000,
+            2_000_000,
             Some("зарплата аниматорам"),
             "-12 days",
         ),
-        ("income-30-days", "income", 80_000, None, "-20 days"),
+        ("income-30-days", "income", 8_000_000, None, "-20 days"),
         (
             "rent-30-days",
             "expense",
-            25_000,
+            2_500_000,
             Some("аренда"),
             "-22 days",
         ),
-        ("income-month-1", "income", 100_000, None, "-1 month"),
+        ("income-month-1", "income", 10_000_000, None, "-1 month"),
         (
             "expense-month-1",
             "expense",
-            70_000,
+            7_000_000,
             Some("программы"),
             "-1 month",
         ),
-        ("income-month-2", "income", 95_000, None, "-2 months"),
+        ("income-month-2", "income", 9_500_000, None, "-2 months"),
         (
             "expense-month-2",
             "expense",
-            60_000,
+            6_000_000,
             Some("реклама"),
             "-2 months",
         ),
-        ("income-month-3", "income", 110_000, None, "-3 months"),
+        ("income-month-3", "income", 11_000_000, None, "-3 months"),
         (
             "expense-month-3",
             "expense",
-            80_000,
+            8_000_000,
             Some("оборудование"),
             "-3 months",
         ),
@@ -981,9 +985,9 @@ fn help_text() -> String {
         "Могу записать приход или расход и показать, сколько денег в кассе.",
         "",
         "Мои команды:",
-        "• Зая начальный остаток 50000",
-        "• Зая доход 15000 (или Зая приход 15000)",
-        "• Зая расход Материалы 4000",
+        "• Зая начальный остаток 50000 или 50000.25",
+        "• Зая доход 15000 (или Зая приход 15000.50)",
+        "• Зая расход Материалы 4000 или 4000.75",
         "• Зая баланс",
         "• Зая, сколько у нас осталось денюжек?",
         "• Зая история расходов",
@@ -997,7 +1001,9 @@ fn help_text() -> String {
 
 pub fn format_money(value: i64) -> String {
     let negative = value.is_negative();
-    let digits = value.unsigned_abs().to_string();
+    let absolute = value.unsigned_abs();
+    let kopecks = absolute % 100;
+    let digits = (absolute / 100).to_string();
     let mut result = String::with_capacity(digits.len() + digits.len() / 3 + 1);
     for (index, ch) in digits.chars().enumerate() {
         if index > 0 && (digits.len() - index).is_multiple_of(3) {
@@ -1008,12 +1014,19 @@ pub fn format_money(value: i64) -> String {
     if negative {
         result.insert(0, '−');
     }
+    if kopecks != 0 {
+        result.push_str(&format!(",{kopecks:02}"));
+    }
     result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const fn rubles(value: i64) -> i64 {
+        value * 100
+    }
 
     fn event(id: &str, message_id: i64) -> EventContext {
         EventContext {
@@ -1027,8 +1040,11 @@ mod tests {
 
     #[test]
     fn formats_money() {
-        assert_eq!(format_money(61_000), "61 000");
-        assert_eq!(format_money(-4_000), "−4 000");
+        assert_eq!(format_money(rubles(61_000)), "61 000");
+        assert_eq!(format_money(rubles(-4_000)), "−4 000");
+        assert_eq!(format_money(2_645_420), "26 454,20");
+        assert_eq!(format_money(20), "0,20");
+        assert_eq!(format_money(-120), "−1,20");
     }
 
     #[test]
@@ -1136,7 +1152,7 @@ mod tests {
             )
             .bind(event_id)
             .bind(peer_id)
-            .bind(amount)
+            .bind(rubles(amount))
             .bind(category)
             .bind(cancelled)
             .bind(created_at)
@@ -1186,6 +1202,130 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn migrates_existing_ruble_amounts_to_kopecks_exactly_once() {
+        let repository = Repository::connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql(include_str!("../migrations/0001_init.sql"))
+            .execute(&repository.pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/0002_outbox.sql"))
+            .execute(&repository.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO operations
+             (event_id, peer_id, author_id, message_id, kind, amount)
+             VALUES ('legacy-income', 42, 7, 1, 'income', 26454)",
+        )
+        .execute(&repository.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO outbox
+             (event_id, peer_id, response_type, payload, keyboard)
+             VALUES
+             ('legacy-chart', 42, 'budget_chart',
+              '[{\"label\":\"2026-10\",\"income\":26454,\"expenses\":120}]', 'reports'),
+             ('legacy-excel', 42, 'excel',
+              '[{\"author_id\":7,\"created_at\":\"2026-10-01 10:00:00\",\"operation_type\":\"Приход\",\"income\":26454,\"expense\":null,\"balance\":26454}]',
+              'current_balance')",
+        )
+        .execute(&repository.pool)
+        .await
+        .unwrap();
+
+        repository.migrate().await.unwrap();
+        let migrated: i64 =
+            sqlx::query_scalar("SELECT amount FROM operations WHERE event_id = 'legacy-income'")
+                .fetch_one(&repository.pool)
+                .await
+                .unwrap();
+        assert_eq!(migrated, 2_645_400);
+        let migrated_outbox = repository.pending_outbox(10).await.unwrap();
+        assert!(migrated_outbox.iter().any(|item| {
+            matches!(&item.payload, OutboxPayload::BudgetChart(months)
+                if months[0].income == 2_645_400 && months[0].expenses == 12_000)
+        }));
+        assert!(migrated_outbox.iter().any(|item| {
+            matches!(&item.payload, OutboxPayload::Excel(rows)
+                if rows[0].income == Some(2_645_400)
+                    && rows[0].expense.is_none()
+                    && rows[0].balance == 2_645_400)
+        }));
+
+        repository.migrate().await.unwrap();
+        let after_restart: i64 =
+            sqlx::query_scalar("SELECT amount FROM operations WHERE event_id = 'legacy-income'")
+                .fetch_one(&repository.pool)
+                .await
+                .unwrap();
+        assert_eq!(after_restart, 2_645_400);
+        assert_eq!(format_money(after_restart), "26 454");
+        let after_restart_outbox = repository.pending_outbox(10).await.unwrap();
+        assert!(after_restart_outbox.iter().any(|item| {
+            matches!(&item.payload, OutboxPayload::BudgetChart(months)
+                if months[0].income == 2_645_400 && months[0].expenses == 12_000)
+        }));
+    }
+
+    #[tokio::test]
+    async fn preserves_kopecks_across_balance_history_and_export() {
+        let repository = Repository::connect("sqlite::memory:").await.unwrap();
+        repository.migrate().await.unwrap();
+        repository
+            .execute(&event("kopecks-income", 1), &Command::Income(2_645_420))
+            .await
+            .unwrap();
+        repository
+            .execute(
+                &event("kopecks-expense", 2),
+                &Command::Expense {
+                    category: "материалы".into(),
+                    amount: 1_234,
+                },
+            )
+            .await
+            .unwrap();
+
+        let balance = repository
+            .execute(&event("kopecks-balance", 3), &Command::Balance)
+            .await
+            .unwrap();
+        assert!(matches!(
+            balance,
+            ExecutionOutcome::Reply { message, .. }
+                if message.contains("26 441,86 ₽")
+        ));
+
+        let history = repository
+            .execute(&event("kopecks-history", 4), &Command::History(14))
+            .await
+            .unwrap();
+        assert!(matches!(
+            history,
+            ExecutionOutcome::Reply { message, .. }
+                if message.contains("12,34 ₽")
+        ));
+
+        repository
+            .execute(
+                &event("kopecks-export", 5),
+                &Command::ExportExcel(crate::domain::ExportScope::FullHistory),
+            )
+            .await
+            .unwrap();
+        let pending = repository.pending_outbox(20).await.unwrap();
+        assert!(pending.iter().any(|item| {
+            item.event_id == "kopecks-export"
+                && matches!(&item.payload, OutboxPayload::Excel(rows)
+                    if rows.len() == 2
+                        && rows[0].income == Some(2_645_420)
+                        && rows[1].expense == Some(1_234)
+                        && rows[1].balance == 2_644_186)
+        }));
+    }
+
+    #[tokio::test]
     async fn balances_are_isolated_by_conversation() {
         let repository = Repository::connect("sqlite::memory:").await.unwrap();
         repository.migrate().await.unwrap();
@@ -1193,14 +1333,14 @@ mod tests {
         let mut first_chat = event("chat-1-opening", 1);
         first_chat.peer_id = 101;
         repository
-            .execute(&first_chat, &Command::OpeningBalance(10_000))
+            .execute(&first_chat, &Command::OpeningBalance(rubles(10_000)))
             .await
             .unwrap();
 
         let mut second_chat = event("chat-2-opening", 1);
         second_chat.peer_id = 202;
         repository
-            .execute(&second_chat, &Command::OpeningBalance(25_000))
+            .execute(&second_chat, &Command::OpeningBalance(rubles(25_000)))
             .await
             .unwrap();
 
@@ -1232,11 +1372,11 @@ mod tests {
         let repository = Repository::connect("sqlite::memory:").await.unwrap();
         repository.migrate().await.unwrap();
         repository
-            .execute(&event("1", 1), &Command::OpeningBalance(50_000))
+            .execute(&event("1", 1), &Command::OpeningBalance(rubles(50_000)))
             .await
             .unwrap();
         repository
-            .execute(&event("2", 2), &Command::Income(15_000))
+            .execute(&event("2", 2), &Command::Income(rubles(15_000)))
             .await
             .unwrap();
         repository
@@ -1244,7 +1384,7 @@ mod tests {
                 &event("3", 3),
                 &Command::Expense {
                     category: "материалы".into(),
-                    amount: 4_000,
+                    amount: rubles(4_000),
                 },
             )
             .await
@@ -1279,7 +1419,7 @@ mod tests {
             } if message.contains("за 14 дней")
         ));
         let duplicate = repository
-            .execute(&event("3", 3), &Command::Income(999_999))
+            .execute(&event("3", 3), &Command::Income(rubles(999_999)))
             .await
             .unwrap();
         assert_eq!(duplicate, ExecutionOutcome::Duplicate);
@@ -1300,7 +1440,7 @@ mod tests {
                     &event(event_id, message_id),
                     &Command::Expense {
                         category: category.into(),
-                        amount,
+                        amount: rubles(amount),
                     },
                 )
                 .await
@@ -1353,7 +1493,7 @@ mod tests {
                 &event("newer-expense", 1),
                 &Command::Expense {
                     category: "новая запись".into(),
-                    amount: 1_000,
+                    amount: rubles(1_000),
                 },
             )
             .await
@@ -1363,7 +1503,7 @@ mod tests {
                 &event("older-expense", 2),
                 &Command::Expense {
                     category: "старая запись".into(),
-                    amount: 2_000,
+                    amount: rubles(2_000),
                 },
             )
             .await
@@ -1448,7 +1588,7 @@ mod tests {
             .await
             .unwrap();
         repository
-            .execute(&event("real-income", 3), &Command::Income(1_234))
+            .execute(&event("real-income", 3), &Command::Income(rubles(1_234)))
             .await
             .unwrap();
 
@@ -1531,12 +1671,12 @@ mod tests {
         repository
             .execute(
                 &event("opening-export", 1),
-                &Command::OpeningBalance(50_000),
+                &Command::OpeningBalance(rubles(50_000)),
             )
             .await
             .unwrap();
         repository
-            .execute(&event("income-export", 2), &Command::Income(15_000))
+            .execute(&event("income-export", 2), &Command::Income(rubles(15_000)))
             .await
             .unwrap();
         repository
@@ -1544,7 +1684,7 @@ mod tests {
                 &event("expense-export", 3),
                 &Command::Expense {
                     category: "материалы".into(),
-                    amount: 4_000,
+                    amount: rubles(4_000),
                 },
             )
             .await
@@ -1573,13 +1713,13 @@ mod tests {
                 && matches!(&item.payload, OutboxPayload::Excel(rows)
                     if rows.len() == 3
                         && rows[0].operation_type == "Начальный остаток"
-                        && rows[0].income == Some(50_000)
-                        && rows[0].balance == 50_000
+                        && rows[0].income == Some(rubles(50_000))
+                        && rows[0].balance == rubles(50_000)
                         && rows[1].operation_type == "Приход"
-                        && rows[1].balance == 65_000
+                        && rows[1].balance == rubles(65_000)
                         && rows[2].operation_type == "Расход — Материалы"
-                        && rows[2].expense == Some(4_000)
-                        && rows[2].balance == 61_000)
+                        && rows[2].expense == Some(rubles(4_000))
+                        && rows[2].balance == rubles(61_000))
         }));
     }
 
@@ -1634,7 +1774,7 @@ mod tests {
         repository.migrate().await.unwrap();
 
         repository
-            .execute(&event("outbox-event", 1), &Command::Income(10_000))
+            .execute(&event("outbox-event", 1), &Command::Income(rubles(10_000)))
             .await
             .unwrap();
 
@@ -1693,7 +1833,10 @@ mod tests {
         let repository = Repository::connect("sqlite::memory:").await.unwrap();
         repository.migrate().await.unwrap();
         repository
-            .execute(&event("friendly-income", 1), &Command::Income(12_345))
+            .execute(
+                &event("friendly-income", 1),
+                &Command::Income(rubles(12_345)),
+            )
             .await
             .unwrap();
 

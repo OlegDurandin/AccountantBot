@@ -40,7 +40,7 @@ pub fn render_operations_excel(rows: &[ExportOperation]) -> Result<Vec<u8>> {
         .set_align(FormatAlign::VerticalCenter);
     let money_format = Format::new()
         .set_font_name("Arial")
-        .set_num_format("#,##0 \"₽\";[Red]-#,##0 \"₽\"")
+        .set_num_format("#,##0.00 \"₽\";[Red]-#,##0.00 \"₽\"")
         .set_align(FormatAlign::Right)
         .set_align(FormatAlign::VerticalCenter);
 
@@ -77,16 +77,21 @@ pub fn render_operations_excel(rows: &[ExportOperation]) -> Result<Vec<u8>> {
         worksheet.write_string_with_format(row, 2, &operation.operation_type, &text_format)?;
 
         if let Some(income) = operation.income {
-            worksheet.write_number_with_format(row, 3, income as f64, &money_format)?;
+            worksheet.write_number_with_format(row, 3, income as f64 / 100.0, &money_format)?;
         } else {
             worksheet.write_blank(row, 3, &money_format)?;
         }
         if let Some(expense) = operation.expense {
-            worksheet.write_number_with_format(row, 4, expense as f64, &money_format)?;
+            worksheet.write_number_with_format(row, 4, expense as f64 / 100.0, &money_format)?;
         } else {
             worksheet.write_blank(row, 4, &money_format)?;
         }
-        worksheet.write_number_with_format(row, 5, operation.balance as f64, &money_format)?;
+        worksheet.write_number_with_format(
+            row,
+            5,
+            operation.balance as f64 / 100.0,
+            &money_format,
+        )?;
     }
 
     if rows.is_empty() {
@@ -115,17 +120,17 @@ mod tests {
                 author_id: 7,
                 created_at: "2026-10-01 10:30:00".into(),
                 operation_type: "Приход".into(),
-                income: Some(50_000),
+                income: Some(5_000_000),
                 expense: None,
-                balance: 50_000,
+                balance: 5_000_000,
             },
             ExportOperation {
                 author_id: 8,
                 created_at: "2026-10-02 11:45:00".into(),
                 operation_type: "Расход — Материалы".into(),
                 income: None,
-                expense: Some(4_000),
-                balance: 46_000,
+                expense: Some(400_000),
+                balance: 4_600_000,
             },
         ])
         .unwrap();

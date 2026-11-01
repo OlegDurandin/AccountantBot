@@ -608,8 +608,8 @@ mod tests {
     fn rendered_attachment_cache_keys_change_with_source_data() {
         let first = [BudgetMonth {
             label: "2026-10".into(),
-            income: 10_000,
-            expenses: 4_000,
+            income: 1_000_000,
+            expenses: 400_000,
         }];
         let mut second = first.clone();
         second[0].expenses += 1;

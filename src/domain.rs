@@ -365,10 +365,55 @@ pub fn normalize_category(value: &str) -> String {
 }
 
 fn parse_amount(value: &str) -> Result<i64, ParseCommandError> {
-    let normalized = value.trim().replace('_', "");
-    let amount = normalized.parse::<i64>().map_err(|_| {
-        ParseCommandError("Сумма должна быть положительным целым числом рублей".into())
-    })?;
+    let normalized = value
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && *ch != '_')
+        .collect::<String>();
+    let invalid = || {
+        ParseCommandError(
+            "Сумма должна быть положительным числом с точностью до копеек, например 26454.20"
+                .into(),
+        )
+    };
+    if normalized.is_empty() || normalized.starts_with(['+', '-']) {
+        return Err(invalid());
+    }
+
+    let separators = normalized
+        .match_indices(['.', ','])
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if separators.len() > 1 {
+        return Err(invalid());
+    }
+    let (rubles, kopecks) = if let Some(separator) = separators.first().copied() {
+        let (rubles, fraction) = normalized.split_at(separator);
+        let fraction = &fraction[1..];
+        if rubles.is_empty()
+            || fraction.is_empty()
+            || fraction.len() > 2
+            || !rubles.chars().all(|ch| ch.is_ascii_digit())
+            || !fraction.chars().all(|ch| ch.is_ascii_digit())
+        {
+            return Err(invalid());
+        }
+        let kopecks = if fraction.len() == 1 {
+            fraction.parse::<i64>().map_err(|_| invalid())? * 10
+        } else {
+            fraction.parse::<i64>().map_err(|_| invalid())?
+        };
+        (rubles.parse::<i64>().map_err(|_| invalid())?, kopecks)
+    } else {
+        if !normalized.chars().all(|ch| ch.is_ascii_digit()) {
+            return Err(invalid());
+        }
+        (normalized.parse::<i64>().map_err(|_| invalid())?, 0)
+    };
+    let amount = rubles
+        .checked_mul(100)
+        .and_then(|value| value.checked_add(kopecks))
+        .ok_or_else(invalid)?;
     if amount <= 0 {
         return Err(ParseCommandError("Сумма должна быть больше нуля".into()));
     }
@@ -383,17 +428,17 @@ mod tests {
     fn parses_spec_examples() {
         assert_eq!(
             parse_command("Начальный остаток 50000").unwrap(),
-            Some(Command::OpeningBalance(50_000))
+            Some(Command::OpeningBalance(5_000_000))
         );
         assert_eq!(
             parse_command("Приход 15000").unwrap(),
-            Some(Command::Income(15_000))
+            Some(Command::Income(1_500_000))
         );
         assert_eq!(
             parse_command("Расход Расходные материалы 4000").unwrap(),
             Some(Command::Expense {
                 category: "расходные материалы".into(),
-                amount: 4_000,
+                amount: 400_000,
             })
         );
     }
@@ -457,7 +502,7 @@ mod tests {
             parse_command("зая, расход Материалы 1000").unwrap(),
             Some(Command::Expense {
                 category: "материалы".into(),
-                amount: 1_000,
+                amount: 100_000,
             })
         );
         assert_eq!(
@@ -468,6 +513,41 @@ mod tests {
             parse_command("очистить тестовые данные").unwrap(),
             Some(Command::DeleteDemo)
         );
+    }
+
+    #[test]
+    fn parses_kopecks_without_floating_point_rounding() {
+        for (command, expected) in [
+            ("Доход 26454.20", 2_645_420),
+            ("Доход 26454,20", 2_645_420),
+            ("Доход 26454.2", 2_645_420),
+            ("Доход 26 454.20", 2_645_420),
+            ("Доход 0.01", 1),
+            ("Доход 20.", 2_000),
+        ] {
+            assert_eq!(
+                parse_command(command).unwrap(),
+                Some(Command::Income(expected)),
+                "command: {command}"
+            );
+        }
+        assert_eq!(
+            parse_command("Расход Материалы 26454.20").unwrap(),
+            Some(Command::Expense {
+                category: "материалы".into(),
+                amount: 2_645_420,
+            })
+        );
+
+        for command in [
+            "Доход 1.234",
+            "Доход 1,2.3",
+            "Доход .20",
+            "Доход -1.00",
+            "Доход 0.00",
+        ] {
+            assert!(parse_command(command).is_err(), "command: {command}");
+        }
     }
 
     #[test]
